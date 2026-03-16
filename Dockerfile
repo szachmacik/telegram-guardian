@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py .
 ENV PYTHONUNBUFFERED=1
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-  CMD python -c "import sys; sys.exit(0)"
-CMD ["python", "bot.py"]
+# Healthcheck: verify python works (container stays up even without token)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=5 \
+  CMD python -c "import httpx; print('ok')" || exit 1
+CMD ["python", "-u", "bot.py"]
