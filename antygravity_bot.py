@@ -258,6 +258,26 @@ async def handle_update(update: dict):
         await msg_guardian("Antygravity sync", f"Online, {len(tasks2)} zadań pending")
         await send(chat_id, f"Sync z Guardianem OK. Zadań pending: {len(tasks2)}"); return
 
+
+    if tl.startswith("/manus"):
+        q = t[6:].strip()
+        if not q:
+            await send(chat_id, "Użycie: `/manus zapytaj Manusa`"); return
+        await send(chat_id, "_Pytam Manus Brain..._")
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.post("https://brain.ofshore.dev/api/guardian",
+                    json={"message":q,"userId":f"antygravity_{chat_id}"},
+                    headers={"Content-Type":"application/json"})
+                if r.status_code == 200:
+                    reply = r.json().get("reply","")
+                    await send_chunks(chat_id, f"*Manus:*\n\n{reply}")
+                else:
+                    await send(chat_id, f"Manus błąd: {r.status_code}")
+        except Exception as ex:
+            await send(chat_id, f"Manus niedostępny: {ex}")
+        return
+
     # ── AI fallback ──────────────────────────────────────────────────
     reply = await ask_claude(text, chat_id)
     await send_chunks(chat_id, reply)
