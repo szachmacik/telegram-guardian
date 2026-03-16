@@ -277,7 +277,12 @@ async def tg(endpoint: str, payload: dict):
 async def send(chat_id, text: str, kbd=None, parse_mode="Markdown"):
     p = {"chat_id":chat_id,"text":text[:4096],"parse_mode":parse_mode}
     if kbd: p["reply_markup"] = kbd
-    await tg("sendMessage", p)
+    r = await tg("sendMessage", p)
+    # Fallback: jeśli Markdown powoduje błąd, wyślij bez formatowania
+    if r and r.status_code == 400 and parse_mode:
+        p2 = {"chat_id":chat_id,"text":text[:4096]}
+        if kbd: p2["reply_markup"] = kbd
+        await tg("sendMessage", p2)
 
 async def send_chunks(chat_id, text: str):
     for i in range(0, len(text), 3800):
