@@ -7,7 +7,7 @@ import asyncio, json, os, logging
 import httpx
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ANTHROPIC_KEY   = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 COOLIFY_URL     = os.environ.get("COOLIFY_URL", "https://coolify.ofshore.dev")
 COOLIFY_TOKEN   = os.environ.get("COOLIFY_TOKEN", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL", "")
@@ -278,6 +278,9 @@ async def handle(update: dict):
 # ── Main polling loop ─────────────────────────────────────────────────────────
 async def main():
     global TG_URL
+    log.info("=== Telegram Guardian Bot starting ===")
+    log.info(f"   TOKEN set: {bool(TELEGRAM_TOKEN and TELEGRAM_TOKEN != 'PLACEHOLDER_SET_THIS')}")
+    log.info(f"   ANTHROPIC set: {bool(ANTHROPIC_KEY)}")
     
     token = await load_telegram_token()
     if not token:
