@@ -662,6 +662,7 @@ async def main():
     offset = 0
     log.info("Polling...")
     
+    conflict_backoff = 1
     while True:
         try:
             async with httpx.AsyncClient(timeout=35) as c:
@@ -670,9 +671,18 @@ async def main():
                 data = r.json()
             
             if not data.get("ok"):
-                log.warning(f"getUpdates: {data.get('description','?')}")
+                desc = data.get("description","?")
+                if "Conflict" in desc or "409" in str(r.status_code):
+                    # Inna instancja bota jest aktywna — czekaj z backoff
+                    log.warning(f"409 Conflict — czekam {conflict_backoff}s na wygaśnięcie starej instancji")
+                    await asyncio.sleep(conflict_backoff)
+                    conflict_backoff = min(conflict_backoff * 2, 30)
+                    continue
+                log.warning(f"getUpdates: {desc}")
                 await asyncio.sleep(5)
                 continue
+            
+            conflict_backoff = 1  # reset backoff po sukcesie
             
             for upd in data["result"]:
                 offset = upd["update_id"] + 1
