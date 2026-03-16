@@ -888,6 +888,18 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
         await send(chat_id, "\n".join(lines))
         return
 
+    if tl in ["/team","team","zespol","zespół","boty"]:
+        await typing(chat_id)
+        team = await sb("bot_get_team") or []
+        lines = ["*Team ofshore.dev*\n"]
+        for b in (team or []):
+            domain = b.get("domain","")
+            icon = "🟢" if b.get("status") == "active" else "🔴"
+            lines.append(f"{icon} *{b['name']}* (@{b.get('username','?')}) — {b['role']}"
+                        + (f"\n  {domain}" if domain else ""))
+        await send(chat_id, "\n".join(lines) if len(lines) > 1 else "Brak zarejestrowanych botów.")
+        return
+
     if tl in ["/antygravity","antygravity","ag","ag status"]:
         await do_antygravity_status(chat_id); return
     if tl.startswith("/ag task") or tl.startswith("/agtask"):
