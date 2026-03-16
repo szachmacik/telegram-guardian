@@ -1009,6 +1009,37 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
             "_Wklej do Claude.ai lub powiedz Manusowi zeby zbudowal._")
         return
 
+
+    # ── Claude (ja) przez Guardiana ─────────────────────────────────
+    if tl.startswith("/claude") or tl.startswith("/expert"):
+        q = text[len("/claude"):].strip() if tl.startswith("/claude") else text[len("/expert"):].strip()
+        if not q: q = "Pomóż z analizą infrastruktury"
+        await typing(chat_id)
+        await send(chat_id, "_Konsultuję z Claude Sonnet..._")
+        reply = await ask_claude(chat_id, q, model=SONNET, force_sonnet=True)
+        await send_chunks(chat_id, f"*Claude Sonnet:*\n\n{reply}")
+        return
+
+    # ── Manus Brain przez Guardian ───────────────────────────────────
+    if tl.startswith("/manus"):
+        q = text[6:].strip()
+        if not q:
+            await send(chat_id, "Użycie: `/manus jakie modele masz dostępne?`"); return
+        await typing(chat_id)
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.post("https://brain.ofshore.dev/api/guardian",
+                    json={"message": q, "userId": f"guardian_{chat_id}"},
+                    headers={"Content-Type":"application/json"})
+                if r.status_code == 200:
+                    reply = r.json().get("reply","brak odpowiedzi")
+                    await send_chunks(chat_id, f"*Manus Brain:*\n\n{reply}")
+                else:
+                    await send(chat_id, f"Manus Brain błąd: {r.status_code}")
+        except Exception as ex:
+            await send(chat_id, f"Manus niedostępny: {ex}")
+        return
+
     # Jezyk naturalny
     await typing(chat_id)
     
