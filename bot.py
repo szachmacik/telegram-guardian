@@ -1,3 +1,4 @@
+import json
 """
 Guardian Bot v6 — Fully Autonomous Manager
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -633,6 +634,63 @@ async def holon_record(agent: str, trigger: str, learning: str, success: bool = 
     except: pass
 
 # ── Watcher — logika krytycznosci ─────────────────────────────────────────
+
+# ─── Antygravity Bot Bridge ──────────────────────────────────────────────────
+AG_TOKEN_ENV = os.environ.get("ANTYGRAVITY_BOT_TOKEN","")
+AG_TG = f"https://api.telegram.org/bot{AG_TOKEN_ENV}" if AG_TOKEN_ENV else None
+
+async def ag_send_task(repo: str, task_type: str, description: str, priority: str = "high"):
+    """Wyslij zadanie do Antygravity przez Supabase."""
+    await sb("bot_send_message", {
+        "p_from": "guardian",
+        "p_to": "antygravity",
+        "p_type": "task",
+        "p_subject": f"{task_type}: {repo}",
+        "p_content": description,
+        "p_metadata": json.dumps({"repo": repo, "task_type": task_type, "priority": priority})
+    })
+    # Też dodaj do antygravity_tasks
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            await c.post(f"{SB_URL}/rest/v1/antygravity_tasks",
+                headers={"apikey":SB_KEY,"Authorization":f"Bearer {SB_KEY}",
+                         "Content-Type":"application/json","Prefer":"return=minimal"},
+                json={"repo_name":repo,"task_type":task_type,
+                      "description":description,"priority":priority,"status":"pending"})
+    except: pass
+
+async def ag_get_messages() -> list:
+    """Pobierz wiadomosci od Antygravity."""
+    result = await sb("bot_get_messages", {"p_bot":"guardian","p_limit":5})
+    return [m for m in (result or []) if m.get("from_bot") == "antygravity"]
+
+async def do_antygravity_status(chat_id):
+    """Status Antygravity bota i jego zadań."""
+    await typing(chat_id)
+    tasks_r = await sb("bot_get_antygravity_tasks", {"p_status":"pending"})
+    done_r  = await sb("bot_get_antygravity_tasks", {"p_status":"done"})
+    msgs    = await ag_get_messages()
+    
+    pending = len(tasks_r or [])
+    done    = len(done_r or [])
+    
+    lines = ["*Antygravity Bot — Status*\n",
+             f"@Antygravity_ofshore_bot",
+             f"Zadania pending: {pending} | Wykonane: {done}\n"]
+    
+    if msgs:
+        lines.append("*Ostatnie raporty od Antygravity:*")
+        for m in msgs[:3]:
+            lines.append(f"  {m.get('subject','?')}: {m.get('content','')[:60]}")
+    
+    if tasks_r:
+        lines.append("\n*Pending tasks:*")
+        for t in (tasks_r or [])[:5]:
+            p = {"critical":"🔴","high":"🟡"}.get(t.get("priority",""),"⚪")
+            lines.append(f"  {p} `{t['repo_name']}` — {t['description'][:50]}")
+    
+    await send(chat_id, "\n".join(lines))
+
 async def watcher():
     """
     Sprawdza stan co 2min.
@@ -772,6 +830,16 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
     if tl in ["/clear","clear","wyczysc","reset"]:
         sessions.pop(chat_id, None)
         await send(chat_id, "Historia wyczyszczona."); return
+    if tl in ["/antygravity","antygravity","ag","ag status"]:
+        await do_antygravity_status(chat_id); return
+    if tl.startswith("/ag task") or tl.startswith("/agtask"):
+        parts = t.split(None, 3)
+        if len(parts) >= 4:
+            await ag_send_task(parts[1], parts[2], parts[3])
+            await send(chat_id, f"Zadanie wysłane do Antygravity: `{parts[1]}`")
+        else:
+            await send(chat_id, "Użycie: `/ag task <repo> <task_type> <opis>`")
+        return
     if tl in ["/tree","tree","drzewo","drzewo zycia","drzewo życia"]:
         await do_tree(chat_id); return
 
