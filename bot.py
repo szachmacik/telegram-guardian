@@ -1,68 +1,49 @@
 """
-Telegram Guardian Bot v5 — Manager ofshore.dev
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FILOZOFIA POMOCNICZOŚCI (jak w katolickiej nauce społecznej):
-  Tier 1 — Haiku (tanie, szybkie)     -> status, komendy, proste pytania
-  Tier 2 — GPT-4o-mini / Gemini Flash -> pytania wymagające więcej kontekstu  
-  Tier 3 — Sonnet (droższe)           -> analiza, debugowanie, planowanie
-  Tier 4 — Konsultacja z Claude.ai    -> gdy bot nie umie czegoś zrobić, prosi Ciebie
-  Tier 5 — Zleca budowę narzędzia     -> gdy funkcja nie istnieje, tworzy ją
+Guardian Bot v6 — Fully Autonomous Manager
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILOZOFIA:
+1. System rozwiązuje sam (AutoHeal, Watchdog, SmokeTester)
+2. Guardian boty appów - lokalna wiedza bez eskalacji
+3. Haiku - szybkie decyzje i proste pytania (tanie)
+4. OpenClaw/Kimi - nieskończony kontekst, agenci
+5. Sonnet - głęboka analiza gdy niższe tiry nie dały rady
+6. Do Macieja TYLKO: app down >5min + auto-fix fail, krytyczny błąd danych/bezpieczeństwa
 
-AI Router:
-  - najpierw próbuje haiku (fast, cheap)
-  - jeśli pytanie złożone -> sonnet
-  - jeśli potrzeba sprawdzenia faktów na żywo -> guardian danej appki
-  - guardiany appów: agentflow, quiz, inbox, english, manus, hub, ai-control
-  - n8n: workflow automation (uruchamia workflow przez API)
-
-Kanały komunikacji:
-  - Telegram (ten bot) — główny
-  - Guardian boty appów — specjalistyczna wiedza
-  - Claude API (Anthropic) — głęboka analiza
-  - n8n — automatyzacja, scheduled tasks
+Nigdy nie budź Macieja dla spraw które system może rozwiązać sam.
+Ucz się na błędach: każdy fix zapisywany do heal_memory.
+Raport dzienny: pozytywny, z oszczędnościami czasu i pieniędzy.
 """
 import asyncio, json, os, logging, re, time
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ── Config ─────────────────────────────────────────────────────────────────
 TG_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
-OPENAI_KEY    = os.environ.get("OPENAI_API_KEY","")    # opcjonalny
-GOOGLE_KEY    = os.environ.get("GOOGLE_API_KEY","")    # opcjonalny
+CLAUDE_KEY    = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_KEY    = os.environ.get("OPENAI_API_KEY","")
+GOOGLE_KEY    = os.environ.get("GOOGLE_API_KEY","")
+KIMI_KEY      = os.environ.get("KIMI_API_KEY","")
+OPENCLAW_KEY  = os.environ.get("OPENCLAW_API_KEY","")
 COOLIFY_URL   = os.environ.get("COOLIFY_URL","https://coolify.ofshore.dev")
 COOLIFY_TOKEN = os.environ.get("COOLIFY_TOKEN","")
 SB_URL        = os.environ.get("SUPABASE_URL","")
 SB_KEY        = os.environ.get("SUPABASE_KEY","")
 N8N_URL       = os.environ.get("N8N_URL","https://n8n.ofshore.dev")
 N8N_KEY       = os.environ.get("N8N_API_KEY","")
+OPENMANUS_URL = os.environ.get("OPENMANUS_URL","https://openmanus.ofshore.dev")
 ALLOWED       = set(x.strip() for x in os.environ.get("ALLOWED_TELEGRAM_IDS","").split(",") if x.strip())
 ADMIN_ID      = os.environ.get("ADMIN_CHAT_ID","")
 TG            = f"https://api.telegram.org/bot{TG_TOKEN}"
 
-# ── AI Models — Tier routing ────────────────────────────────────────────────
-# Tier 1: Haiku — szybkie, tanie (komendy, status, proste Q&A)
-TIER1 = "claude-haiku-4-5-20251001"
-# Tier 2: Sonnet — głęboka analiza, debugowanie, planowanie
-TIER2 = "claude-sonnet-4-6"
-# Tier 2B: GPT-4o-mini — fallback gdy chcemy drugi model (sprawdzenie krzyżowe)
-GPT_MINI = "gpt-4o-mini"
-# Tier 2C: Gemini Flash — szybki fallback
-GEMINI = "gemini-1.5-flash"
+# ── Modele AI ─────────────────────────────────────────────────────────────
+HAIKU   = "claude-haiku-4-5-20251001"   # Tier1: tanie/szybkie
+SONNET  = "claude-sonnet-4-6"           # Tier3: analiza/decyzje
+GPT_MINI = "gpt-4o-mini"               # fallback
+GEMINI  = "gemini-1.5-flash"           # fallback
 
-def pick_tier(text: str) -> str:
-    """Zasada pomocniczości: najpierw tanie, dopiero potem drogie."""
-    t = text.lower()
-    # Zawsze Sonnet dla złożonych zadań
-    if any(w in t for w in [
-        "dlaczego","analiz","debug","przyczyn","strategi","architektur",
-        "optymali","wytłumacz szczeg","porównaj dokładn","zaplanuj","napisz kod",
-        "zbuduj","stwórz aplikacj","napraw","why is","explain in detail",
-        "analyze","root cause"
-    ]):
-        return TIER2
-    # Haiku dla wszystkiego prostego
-    return TIER1
+# Progi krytyczności — kiedy budzić Macieja
+CRITICAL_DOWNTIME_MIN = 5   # app down >5min = krytyczne
+CRITICAL_ERRORS = ["data_loss","payment_fail","security_breach","database_corrupt"]
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [BOT] %(message)s", datefmt="%H:%M:%S")
@@ -72,28 +53,31 @@ sessions: dict[str, list] = {}
 app_cache: list = []
 cache_ts: float = 0
 alert_notified: set = set()
+downtime_tracker: dict = {}   # app_name -> first_seen_down timestamp
 
 # ── App registry ────────────────────────────────────────────────────────────
 APPS = {
-    "agentflow":      ("ts0c0wgco8wo8kgocok84cws", "agentflow.ofshore.dev"),
-    "quiz":           ("yssco8cc800ow880w0wo48o0",  "quiz.ofshore.dev"),
-    "quiz-manager":   ("yssco8cc800ow880w0wo48o0",  "quiz.ofshore.dev"),
-    "inbox":          ("tcww08co80wsgwwg8swwgss8",  "inbox.ofshore.dev"),
-    "omnichannel":    ("tcww08co80wsgwwg8swwgss8",  "inbox.ofshore.dev"),
-    "english":        ("d0800oks0g4gws0kw04ck00s",  "english-teacher.ofshore.dev"),
-    "english-teacher":("d0800oks0g4gws0kw04ck00s",  "english-teacher.ofshore.dev"),
-    "manus":          ("kssk4o48sgosgwwck8s8ws80",  "brain.ofshore.dev"),
-    "brain":          ("kssk4o48sgosgwwck8s8ws80",  "brain.ofshore.dev"),
-    "integration":    ("s44sck0k0os0k4w0www00cg4",  "hub.ofshore.dev"),
-    "hub":            ("s44sck0k0os0k4w0www00cg4",  "hub.ofshore.dev"),
-    "sentinel":       ("rs488c4ccg48w48gocgog8sg",  "sentinel.ofshore.dev"),
-    "ai-control":     ("hokscgg48sowg44wwc044gk8",  "ai-control-center.ofshore.dev"),
-    "security":       ("wg0gkco8g0swgccc8www04gg",  "security.ofshore.dev"),
-    "watchdog":       ("g8csck0kw8c0sc0cosg0cw84",  None),
-    "autoheal":       ("vcgk0g4sc4sck0kkc8k080gk",  None),
-    "smoketester":    ("qws0sk4gooo4ok8cswc0o0kw",  None),
-    "telegram":       ("qook8w0sw4o404swcoookg00",   None),
-    "n8n":            (None,                          "n8n.ofshore.dev"),
+    "agentflow":     ("ts0c0wgco8wo8kgocok84cws","agentflow.ofshore.dev"),
+    "quiz":          ("yssco8cc800ow880w0wo48o0","quiz.ofshore.dev"),
+    "quiz-manager":  ("yssco8cc800ow880w0wo48o0","quiz.ofshore.dev"),
+    "inbox":         ("tcww08co80wsgwwg8swwgss8","inbox.ofshore.dev"),
+    "omnichannel":   ("tcww08co80wsgwwg8swwgss8","inbox.ofshore.dev"),
+    "english":       ("d0800oks0g4gws0kw04ck00s","english-teacher.ofshore.dev"),
+    "english-teacher":("d0800oks0g4gws0kw04ck00s","english-teacher.ofshore.dev"),
+    "manus":         ("kssk4o48sgosgwwck8s8ws80","brain.ofshore.dev"),
+    "brain":         ("kssk4o48sgosgwwck8s8ws80","brain.ofshore.dev"),
+    "integration":   ("s44sck0k0os0k4w0www00cg4","hub.ofshore.dev"),
+    "hub":           ("s44sck0k0os0k4w0www00cg4","hub.ofshore.dev"),
+    "sentinel":      ("rs488c4ccg48w48gocgog8sg","sentinel.ofshore.dev"),
+    "ai-control":    ("hokscgg48sowg44wwc044gk8","ai-control-center.ofshore.dev"),
+    "security":      ("wg0gkco8g0swgccc8www04gg","security.ofshore.dev"),
+    "wp-manager":    ("wp_mgr_uuid","wp-manager.ofshore.dev"),
+    "kamila":        (None,"kamila.ofshore.dev"),
+    "openmanus":     (None,"openmanus.ofshore.dev"),
+    "kimi":          (None,"kimi-swarm.ofshore.dev"),
+    "watchdog":      ("g8csck0kw8c0sc0cosg0cw84",None),
+    "autoheal":      ("vcgk0g4sc4sck0kkc8k080gk",None),
+    "smoketester":   ("qws0sk4gooo4ok8cswc0o0kw",None),
 }
 
 def find_app(text: str):
@@ -103,8 +87,8 @@ def find_app(text: str):
             return name, uuid, domain
     return None, None, None
 
-# ── HTTP helpers ────────────────────────────────────────────────────────────
-async def sb_rpc(fn: str, params: dict = {}) -> any:
+# ── HTTP helpers ──────────────────────────────────────────────────────────
+async def sb(fn: str, params: dict = {}) -> any:
     if not SB_URL: return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -133,140 +117,112 @@ async def get_apps(force=False) -> list:
         app_cache = apps; cache_ts = now
     return app_cache or []
 
-# ── Infra snapshot ──────────────────────────────────────────────────────────
-async def infra_snapshot() -> dict:
+# ── Infra snapshot ────────────────────────────────────────────────────────
+async def snap() -> dict:
     apps   = await get_apps(force=True)
-    smoke  = await sb_rpc("public_get_smoke_summary") or []
-    alerts = await sb_rpc("public_get_alerts") or []
+    smoke  = await sb("public_get_smoke_summary") or []
+    alerts = await sb("public_get_alerts") or []
+    goals  = await sb("public_get_autonomous_goals") or []
+    crit   = await sb("public_get_critical_unresolved") or []
     healthy = [a for a in apps if "running" in a.get("status","")]
     broken  = [a for a in apps if "exited" in a.get("status","") or "restarting" in a.get("status","")]
-    failed_smoke = [s for s in smoke if not s.get("passed")]
+    missing = [g for g in (goals or []) if g.get("implementation") == "missing"]
+    partial = [g for g in (goals or []) if g.get("implementation") == "partial"]
     return {
         "total":len(apps), "healthy":len(healthy), "broken":len(broken),
         "broken_names":[a["name"] for a in broken],
         "healthy_names":[a["name"] for a in healthy],
-        "smoke_total":len(smoke), "smoke_failed":len(failed_smoke),
-        "smoke_failures":[(s["app_name"],s["test_name"]) for s in failed_smoke[:6]],
-        "alerts":len(alerts), "alert_list":alerts[:5],
+        "smoke_failed":sum(1 for s in smoke if not s.get("passed")),
+        "smoke_total":len(smoke),
+        "smoke_failures":[(s["app_name"],s["test_name"]) for s in smoke if not s.get("passed")][:5],
+        "alerts":len(alerts), "crit_alerts":len(crit),
+        "goals_missing":len(missing), "goals_partial":len(partial),
+        "missing_goals":[g.get("goal","") for g in missing[:3]],
         "ts":datetime.now().strftime("%H:%M %d.%m.%Y"),
     }
 
 async def infra_ctx() -> str:
-    s = await infra_snapshot()
+    s = await snap()
     ctx = f"INFRA [{s['ts']}]: {s['healthy']}/{s['total']} OK"
     if s["broken_names"]: ctx += f" | DOWN: {', '.join(s['broken_names'])}"
-    if s["smoke_failures"]: ctx += f" | SMOKE_FAIL: {', '.join(f'{a}/{t}' for a,t in s['smoke_failures'][:3])}"
-    if s["alerts"]: ctx += f" | {s['alerts']} ALERTÓW"
+    if s["smoke_failures"]: ctx += f" | FAIL: {', '.join(f'{a}/{t}' for a,t in s['smoke_failures'][:2])}"
+    if s["crit_alerts"]: ctx += f" | KRYTYCZNE: {s['crit_alerts']}"
+    if s["goals_missing"]: ctx += f" | BRAK_AUTO: {s['goals_missing']}"
     return ctx
 
-# ── AI Router — serce systemu ───────────────────────────────────────────────
-PERSONA = """Jesteś Guardian — manager infrastruktury ofshore.dev, prawa ręka Macieja.
+# ── AI Router — zasada pomocniczości ─────────────────────────────────────
+PERSONA = """Jestes Guardian — menedzer infrastruktury ofshore.dev, prawa reka Macieja.
 
-ZASADY (pomocniczość — najpierw niższe koszty):
-1. Odpowiadaj konkretnie, bez owijania w bawełnę
-2. NIGDY nie mów "nie mogę", "nie mam dostępu", "to poza moimi możliwościami"
-3. Jeśli czegoś nie umiesz ZROBIĆ — powiedz CO Maciej powinien zrobić lub zleć to dalej
-4. Jeśli potrzebujesz głębszej analizy -> powiedz "Skonsultuję z Claude.ai" i użyj /claude
-5. Jeśli brakuje funkcji — zaproponuj budowę przez /build <opis>
-6. Masz dostęp do guardianów każdej appki przez /ask <app> <pytanie>
+ZASADA POMOCNICZOSCI — hierarchia decyzji:
+1. AutoHeal/Watchdog rozwiazuja problem -> nic nie rob, zapisz do logu
+2. Guardian lokalnej appki zna odpowiedz -> zapytaj go, nie eskaluj
+3. Haiku wystarczy do prostej odpowiedzi -> uzyj Haiku
+4. Kimi (nieskonczone okno) gdy duze dane/logi -> uzyj Kimi  
+5. Sonnet gdy gleboka analiza kodu/architektury -> uzyj Sonnet
+6. Maciej TYLKO gdy: app down >5min + auto-fix fail, krytyczne bezpieczenstwo/dane
 
-DOSTĘPNE AI w ekosystemie:
-- Claude Haiku (szybkie odpowiedzi, monitoring)
-- Claude Sonnet (analiza, debugowanie)
-- OpenAI GPT-4o (jeśli dostępny)
-- Guardiany appów (agentflow, quiz, manus, english, inbox, hub, ai-control)
-- n8n (workflow automation)
+NIGDY nie pisz do Macieja dla spraw ktore system moze rozwiazac sam.
+ZAWSZE probuj naprawic samodzielnie zanim zaalarmuj.
+Jak cos naprawisz - zapisz do heal_memory zeby nastepnym razem bylo szybciej.
 
-INFRASTRUKTURA:
-24+ aplikacji na ofshore.dev, DigitalOcean + Coolify + Supabase + GitHub
-Stack: React+tRPC+Drizzle+MySQL/Postgres, Python boty
+AI w ekosystemie:
+- Guardian boty: agentflow, quiz, manus, english, inbox, hub, ai-control, wp-manager
+- OpenManus: autonomiczny agent (POST openmanus.ofshore.dev/api/tasks)
+- Kimi Swarm: kimi-swarm.ofshore.dev - koordynacja agentow, nieskonczone okno
+- n8n: workflow automation - uruchamiaj przez API
+- Supabase: wszystkie dane, savings_tracker, autonomy_log, content_queue
 
-Odpowiadaj po polsku gdy Maciej pisze po polsku. Emoji z umiarem."""
+STYL: konkretnie, bez owijania. Emoji z umiarem. Po polsku jesli user pisze po polsku."""
 
-async def ask_ai(chat_id: str, user_msg: str, model: str = None,
-                 extra_ctx: str = "", force_sonnet: bool = False) -> str:
-    """
-    AI Router z zasadą pomocniczości.
-    Haiku first, Sonnet tylko gdy potrzeba, fallback do drugiego modelu.
-    """
-    chosen = model or (TIER2 if force_sonnet else pick_tier(user_msg))
-    ctx    = await infra_ctx()
-    hist   = sessions.get(chat_id, [])
-    msgs   = hist[-14:] + [{"role":"user","content":user_msg}]
+async def ask_claude(chat_id: str, msg: str, model: str = HAIKU,
+                     extra: str = "", no_history: bool = False) -> str:
+    ctx   = await infra_ctx()
+    hist  = [] if no_history else sessions.get(chat_id, [])
+    msgs  = hist[-12:] + [{"role":"user","content":msg}]
     system = PERSONA + f"\n\n{ctx}"
-    if extra_ctx: system += f"\n\nDODATKOWY KONTEKST:\n{extra_ctx}"
-
-    # Próba 1: Anthropic (Claude)
+    if extra: system += f"\n\nKONTEKST:\n{extra}"
     try:
         async with httpx.AsyncClient(timeout=50) as c:
             r = await c.post("https://api.anthropic.com/v1/messages",
-                headers={"x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01",
+                headers={"x-api-key":CLAUDE_KEY,"anthropic-version":"2023-06-01",
                          "content-type":"application/json"},
-                json={"model":chosen,"max_tokens":2000,"system":system,"messages":msgs})
+                json={"model":model,"max_tokens":2000,"system":system,"messages":msgs})
             data = r.json()
-            if data.get("content"):
+            if "content" in data:
                 reply = data["content"][0]["text"]
-                hist.append({"role":"user","content":user_msg})
-                hist.append({"role":"assistant","content":reply})
-                sessions[chat_id] = hist[-20:]
-                log.info(f"[AI] {chosen} -> {len(reply)} chars")
+                if not no_history:
+                    hist.append({"role":"user","content":msg})
+                    hist.append({"role":"assistant","content":reply})
+                    sessions[chat_id] = hist[-20:]
                 return reply
-            # Haiku fail -> try Sonnet
-            if chosen == TIER1:
-                log.warning(f"Haiku failed, trying Sonnet: {data.get('error','?')}")
-                return await ask_ai(chat_id, user_msg, TIER2, extra_ctx)
+            # Haiku fail -> Sonnet
+            if model == HAIKU:
+                return await ask_claude(chat_id, msg, SONNET, extra, no_history)
     except Exception as ex:
-        log.error(f"Anthropic error: {ex}")
-
-    # Fallback: GPT-4o-mini (jeśli klucz dostępny)
-    if OPENAI_KEY and OPENAI_KEY.startswith("sk-"):
+        log.error(f"Claude {model}: {ex}")
+    # Fallback GPT
+    if OPENAI_KEY and OPENAI_KEY.startswith("sk-") and not OPENAI_KEY.startswith("sk-proj-P"):
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post("https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization":f"Bearer {OPENAI_KEY}",
-                             "Content-Type":"application/json"},
+                    headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
                     json={"model":GPT_MINI,"max_tokens":1500,
                           "messages":[{"role":"system","content":system}]+msgs})
                 data = r.json()
                 if data.get("choices"):
-                    reply = data["choices"][0]["message"]["content"]
-                    log.info(f"[AI] GPT-4o-mini fallback -> {len(reply)} chars")
-                    hist.append({"role":"user","content":user_msg})
-                    hist.append({"role":"assistant","content":reply})
-                    sessions[chat_id] = hist[-20:]
-                    return reply
-        except Exception as ex:
-            log.error(f"OpenAI fallback error: {ex}")
+                    return data["choices"][0]["message"]["content"]
+        except: pass
+    return "Blad AI — sprawdz klucze API w Coolify."
 
-    return "⚠️ Wszystkie modele AI niedostępne. Sprawdź klucze API w Coolify."
+def needs_sonnet(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in [
+        "dlaczego","analiz","debug","przyczyn","strategi","architek",
+        "optymali","wyjasnij doklad","porownaj","zaplanuj","napisz kod",
+        "root cause","explain in detail","analyze","refactor"
+    ])
 
-# ── Specjalne akcje: konsultacja z Claude.ai ───────────────────────────────
-async def escalate_to_claude(chat_id: str, question: str) -> str:
-    """
-    Gdy bot nie potrafi rozwiązać problemu sam, eskaluje do Claude Sonnet
-    z pełnym kontekstem i prosi o plan działania.
-    """
-    snap   = await infra_snapshot()
-    smoke  = await sb_rpc("public_get_smoke_summary") or []
-    alerts = await sb_rpc("public_get_alerts") or []
-    
-    context = f"""
-Pytanie od Macieja (właściciela ofshore.dev): {question}
-
-Stan infrastruktury:
-- Apps: {snap['healthy']}/{snap['total']} zdrowych
-- Problemy: {', '.join(snap['broken_names']) or 'brak'}
-- Smoke fails: {', '.join(f"{a}/{t}" for a,t in snap['smoke_failures']) or 'brak'}
-- Alerty: {snap['alerts']}
-
-Maciej potrzebuje konkretnej porady technicznej lub planu działania.
-Odpowiedz szczegółowo — to jest eskalacja do głównego doradcy.
-"""
-    
-    prompt = f"ESKALACJA: {question}\n\n{context}"
-    return await ask_ai(chat_id, prompt, model=TIER2, force_sonnet=True)
-
-# ── Telegram helpers ────────────────────────────────────────────────────────
+# ── Telegram helpers ──────────────────────────────────────────────────────
 async def tg(endpoint: str, payload: dict):
     try:
         async with httpx.AsyncClient(timeout=12) as c:
@@ -278,178 +234,298 @@ async def send(chat_id, text: str, kbd=None, parse_mode="Markdown"):
     p = {"chat_id":chat_id,"text":text[:4096],"parse_mode":parse_mode}
     if kbd: p["reply_markup"] = kbd
     r = await tg("sendMessage", p)
-    # Fallback: jeśli Markdown powoduje błąd, wyślij bez formatowania
-    if r and r.status_code == 400 and parse_mode:
+    if r and r.status_code == 400:
         p2 = {"chat_id":chat_id,"text":text[:4096]}
         if kbd: p2["reply_markup"] = kbd
         await tg("sendMessage", p2)
 
 async def send_chunks(chat_id, text: str):
-    for i in range(0, len(text), 3800):
+    for i in range(0, min(len(text),12000), 3800):
         await send(chat_id, text[i:i+3800])
         if len(text) > 3800: await asyncio.sleep(0.3)
 
 async def typing(chat_id):
     await tg("sendChatAction", {"chat_id":chat_id,"action":"typing"})
 
-async def answer_cb(cb_id: str, text="✅"):
-    await tg("answerCallbackQuery", {"callback_query_id":cb_id,"text":text})
+async def answer_cb(cb_id: str):
+    await tg("answerCallbackQuery", {"callback_query_id":cb_id,"text":"OK"})
 
-# ── Keyboards ───────────────────────────────────────────────────────────────
+# ── Keyboards ─────────────────────────────────────────────────────────────
 def kbd_main():
     return {"inline_keyboard": [
         [{"text":"📊 Status","callback_data":"status"},
-         {"text":"🧪 Testy","callback_data":"smoke"},
-         {"text":"🚨 Alerty","callback_data":"alerts"}],
-        [{"text":"📋 Watchdog","callback_data":"logs_watchdog"},
-         {"text":"📋 AutoHeal","callback_data":"logs_autoheal"},
-         {"text":"📋 Smoketester","callback_data":"logs_smoketester"}],
-        [{"text":"📱 Aplikacje","callback_data":"apps"},
-         {"text":"📋 Raport","callback_data":"report"},
-         {"text":"🔄 Odśwież","callback_data":"status"}],
+         {"text":"💰 Oszczednosci","callback_data":"savings"},
+         {"text":"🚨 Krytyczne","callback_data":"critical"}],
+        [{"text":"🧪 Smoke","callback_data":"smoke"},
+         {"text":"🤖 Auto-log","callback_data":"autonomy"},
+         {"text":"🎯 Cele","callback_data":"goals"}],
+        [{"text":"📋 WD logi","callback_data":"logs_watchdog"},
+         {"text":"📋 AH logi","callback_data":"logs_autoheal"},
+         {"text":"🔄 Odswierz","callback_data":"status"}],
     ]}
 
-def kbd_ai():
-    return {"inline_keyboard": [
-        [{"text":"🤖 Konsultuj Claude","callback_data":"escalate"},
-         {"text":"🔧 Zbuduj funkcję","callback_data":"build"}],
-        [{"text":"◀️ Powrót","callback_data":"status"}],
-    ]}
-
-# ── Action handlers ─────────────────────────────────────────────────────────
+# ── Actions ───────────────────────────────────────────────────────────────
 async def do_status(chat_id):
     await typing(chat_id)
-    s = await infra_snapshot()
-    lines = [f"*📊 Infrastruktura* `{s['ts']}`\n",
-             f"✅ {s['healthy']} OK  |  ❌ {s['broken']} problemy  |  📱 {s['total']} łącznie"]
+    s = await snap()
+    lines = [f"*Infrastruktura* `{s['ts']}`\n",
+             f"OK: {s['healthy']}/{s['total']}  |  Problem: {s['broken']}  |  "
+             f"Alerty: {s['alerts']}  |  Krytyczne: {s['crit_alerts']}"]
     if s["broken_names"]:
-        lines.append("\n*🔴 Problemy:*")
-        for n in s["broken_names"]: lines.append(f"  • `{n}`")
+        lines.append("\n*DOWN:*")
+        for n in s["broken_names"]: lines.append(f"  - `{n}`")
     if s["smoke_failures"]:
-        lines.append(f"\n*🧪 Smoke fails ({s['smoke_failed']}/{s['smoke_total']}):*")
-        for app, test in s["smoke_failures"][:5]: lines.append(f"  • `{app}/{test}`")
-    if s["alerts"]: lines.append(f"\n*🚨 Aktywne alerty: {s['alerts']}*")
-    healthy_str = ", ".join(f"`{n}`" for n in s["healthy_names"][:10])
-    if s["healthy_names"]:
-        lines.append(f"\n*🟢 Zdrowe:* {healthy_str}")
-        if len(s["healthy_names"]) > 10:
-            lines.append(f"_...i {len(s['healthy_names'])-10} więcej_")
+        lines.append(f"\n*Smoke fails ({s['smoke_failed']}/{s['smoke_total']}):*")
+        for a,t in s["smoke_failures"]: lines.append(f"  - `{a}/{t}`")
+    if s["goals_missing"]:
+        lines.append(f"\n*Brak automatyzacji ({s['goals_missing']} celów):*")
+        for g in s["missing_goals"]: lines.append(f"  - _{g}_")
+    lines.append(f"\n*OK:* " + ", ".join(f"`{n}`" for n in s["healthy_names"][:10]))
+    if len(s["healthy_names"]) > 10:
+        lines.append(f"_...i {len(s['healthy_names'])-10} wiecej_")
     await send(chat_id, "\n".join(lines), kbd=kbd_main())
 
-async def do_smoke(chat_id):
+async def do_savings(chat_id):
     await typing(chat_id)
-    summary = await sb_rpc("public_get_smoke_summary") or []
-    if not summary:
-        await send(chat_id, "⚠️ Brak wyników. SmokeTester działa co ~10min."); return
-    ok = [s for s in summary if s.get("passed")]
-    fail = [s for s in summary if not s.get("passed")]
-    lines = [f"*🧪 Smoke testy* `{datetime.now().strftime('%H:%M')}`\n",
-             f"✅ {len(ok)}/{len(summary)} przechodzi"]
-    if fail:
-        lines.append("\n*❌ Nieprzechodzące:*")
-        for s in fail[:12]:
-            det = s.get("details","")[:55]
-            lines.append(f"  • `{s['app_name']}/{s['test_name']}` — {det}")
-    else:
-        lines.append("\n🎉 Wszystkie OK!")
+    rep = await sb("public_get_savings_report", {"p_days": 7})
+    rep30 = await sb("public_get_savings_report", {"p_days": 30})
+    
+    if not rep:
+        await send(chat_id,
+            "Savings tracker jeszcze nie ma danych.\n"
+            "Dane zbierane sa automatycznie przez AutoHeal i SmokeTester.\n"
+            "Sprawdz ponownie po 24h dzialania systemu.")
+        return
+    
+    h7  = rep.get("total_time_saved_hours", 0) or 0
+    c7  = rep.get("total_cost_saved_usd", 0) or 0
+    ai7 = rep.get("total_ai_cost_usd", 0) or 0
+    n7  = rep.get("net_saving_usd", 0) or 0
+    a7  = rep.get("actions_count", 0) or 0
+    h30 = (rep30 or {}).get("total_time_saved_hours", 0) or 0
+    n30 = (rep30 or {}).get("net_saving_usd", 0) or 0
+    
+    lines = [
+        "*System dziala — oszczednosci*\n",
+        f"*Ostatnie 7 dni:*",
+        f"  Czas zaoszczedzony: `{h7}h`  (~{int(float(h7)*60)}min pracy recznej)",
+        f"  Koszty zaoszczedzone: `${c7}`",
+        f"  Koszty AI: `${ai7}`",
+        f"  *Net saving: `${n7}` (+{a7} akcji autonomicznych)*",
+        "",
+        f"*Ostatnie 30 dni:*",
+        f"  Czas: `{h30}h` | Net: `${n30}`",
+        "",
+        "_Kazda naprawiona awaria to ~30-120min pracy recznej zaoszczona._",
+        "_Kazda generowana tresc to ~2h content writera._"
+    ]
+    
+    # Top events
+    by_type = rep.get("by_type") or []
+    if by_type:
+        lines.append("\n*Top zdarzenia:*")
+        for item in (by_type or [])[:5]:
+            lines.append(f"  `{item.get('event_type','?')}` x{item.get('count',0)} "
+                        f"— ${item.get('cost_saved_usd',0)}")
+    
+    await send(chat_id, "\n".join(lines), kbd=kbd_main())
+
+async def do_critical(chat_id):
+    await typing(chat_id)
+    crits = await sb("public_get_critical_unresolved") or []
+    if not crits:
+        await send(chat_id,
+            "Brak krytycznych alertow wymagajacych Twojej uwagi.\n"
+            "System dziala autonomicznie — nie masz nic do roboty! ✅",
+            kbd=kbd_main())
+        return
+    lines = [f"*Wymagana Twoja uwaga ({len(crits)})*\n"]
+    for c in crits:
+        lines.append(f"*{c.get('alert_type','?')}* — `{c.get('app_name','?')}`")
+        lines.append(f"  {c.get('message','')[:100]}")
+        lines.append(f"  ID: `{c.get('id')}` | `/resolve {c.get('id')}`")
     await send(chat_id, "\n".join(lines))
 
-async def do_alerts(chat_id):
+async def do_autonomy_log(chat_id):
     await typing(chat_id)
-    alerts = await sb_rpc("public_get_alerts") or []
-    if not alerts:
-        await send(chat_id, "✅ Brak aktywnych alertów!"); return
-    lines = [f"*🚨 Alerty ({len(alerts)})*\n"]
-    for a in alerts[:8]:
-        icon = "🔴" if a.get("severity") == "critical" else "🟡"
-        lines.append(f"{icon} `{a.get('app_name')}` [{a.get('severity','?')}]")
-        lines.append(f"   _{a.get('message','')[:80]}_")
-    await send(chat_id, "\n".join(lines))
+    log_data = await sb("public_get_autonomy_log", {"p_hours": 24}) or []
+    if not log_data:
+        await send(chat_id, "Brak wpisow w ostatnich 24h (lub tabela pusta)."); return
+    lines = [f"*System dziala autonomicznie — ostatnie 24h ({len(log_data)} akcji)*\n"]
+    for entry in log_data[:15]:
+        icon = {"critical":"🔴","warning":"🟡","info":"✅"}.get(entry.get("severity","info"),"➡")
+        human = " [HUMAN_NEEDED]" if entry.get("human_needed") else ""
+        lines.append(f"{icon} `{entry.get('actor','?')}` -> {entry.get('action','?')} "
+                    f"`{entry.get('app_name','?') or '-'}`{human}")
+        if entry.get("description"):
+            lines.append(f"   _{entry['description'][:60]}_")
+    await send_chunks(chat_id, "\n".join(lines))
+
+async def do_goals(chat_id):
+    await typing(chat_id)
+    goals = await sb("public_get_autonomous_goals") or []
+    if not goals:
+        await send(chat_id, "Brak zdefiniowanych celow autonomicznych."); return
+    
+    done    = [g for g in goals if g.get("implementation") == "done"]
+    partial = [g for g in goals if g.get("implementation") == "partial"]
+    missing = [g for g in goals if g.get("implementation") == "missing"]
+    
+    lines = [f"*Cele autonomiczne systemu*\n",
+             f"Zrealizowane: {len(done)} | Czesciowe: {len(partial)} | Brakujace: {len(missing)}\n"]
+    
+    if missing:
+        lines.append("*Do zbudowania:*")
+        for g in missing:
+            lines.append(f"  `{g['app_name']}` — {g['goal'][:60]}")
+            if g.get("notes"): lines.append(f"    _{g['notes'][:60]}_")
+    
+    if partial:
+        lines.append("\n*W trakcie (wymagaja dokonczenia):*")
+        for g in partial[:5]:
+            lines.append(f"  `{g['app_name']}` — {g['goal'][:60]}")
+    
+    lines.append(f"\n*Dzialajace autonomicznie ({len(done)}):*")
+    for g in done:
+        lines.append(f"  `{g['app_name']}` — {g['goal'][:50]}")
+    
+    await send_chunks(chat_id, "\n".join(lines))
 
 async def do_logs(chat_id, app_ref: str):
     name, uuid, _ = find_app(app_ref)
     if not uuid:
-        await send(chat_id, f"❓ `{app_ref}` — nie znam. Spróbuj: watchdog, autoheal, quiz..."); return
+        await send(chat_id, f"Nie znam `{app_ref}`. Dostepne: watchdog, autoheal, quiz, manus..."); return
     await typing(chat_id)
     r = await cf(f"/applications/{uuid}/logs?lines=40")
     logs = r.get("logs","") if isinstance(r,dict) else ""
     if not logs:
-        await send(chat_id, f"❌ Brak logów dla `{name}`."); return
+        await send(chat_id, f"Brak logow dla `{name}`."); return
     lines = [l for l in logs.split("\n") if l.strip()][-25:]
-    await send_chunks(chat_id, f"*📋 Logi `{name}` (25 linii)*\n```\n" + "\n".join(lines) + "\n```")
+    await send_chunks(chat_id, f"*Logi `{name}` (25 linii)*\n```\n" + "\n".join(lines) + "\n```")
 
 async def do_restart(chat_id, app_ref: str):
     name, uuid, _ = find_app(app_ref)
     if not uuid:
-        await send(chat_id, f"❓ Nie znam `{app_ref}`."); return
+        await send(chat_id, f"Nie znam `{app_ref}`."); return
     await typing(chat_id)
     r = await cf(f"/applications/{uuid}/restart","POST")
-    if r.get("message") or r.get("deployment_uuid"):
-        await send(chat_id, f"🔄 Restart `{name}` zlecony! Za ~1min sprawdź `/status`.")
-    else:
-        await send(chat_id, f"❌ Błąd restartu `{name}`: {str(r)[:80]}")
+    ok = bool(r.get("message") or r.get("deployment_uuid"))
+    await send(chat_id, f"{'Restart' if ok else 'BLAD restartu'} `{name}` {'zlecony' if ok else str(r)[:60]}")
+    if ok:
+        await sb("public_log_autonomy", {
+            "p_actor":"guardian_bot","p_action":"restart","p_app_name":name,
+            "p_severity":"warning","p_description":f"Manual restart via Telegram by owner"})
 
 async def do_deploy(chat_id, app_ref: str):
     name, uuid, _ = find_app(app_ref)
     if not uuid:
-        await send(chat_id, f"❓ Nie znam `{app_ref}`."); return
+        await send(chat_id, f"Nie znam `{app_ref}`."); return
     await typing(chat_id)
     r = await cf(f"/deploy?uuid={uuid}&force=true","GET")
     deps = r.get("deployments",[]) if isinstance(r,dict) else []
-    dep_id = deps[0].get("deployment_uuid","?")[:14] if deps else "?"
-    await send(chat_id, f"🚀 Deploy `{name}` zlecony!\nID: `{dep_id}...`\nSprawdź za ~3min: `/status`")
-
-async def do_apps(chat_id):
-    await typing(chat_id)
-    apps = await get_apps(force=True)
-    if not apps:
-        await send(chat_id, "❌ Błąd pobierania listy."); return
-    lines = [f"*📱 Aplikacje ({len(apps)})*\n"]
-    for a in sorted(apps, key=lambda x: x.get("name","")):
-        s = a.get("status","?")
-        icon = "✅" if "healthy" in s else "🟡" if "running" in s else "❌"
-        fqdn = a.get("fqdn","").replace("https://","").replace("http://","")
-        domain = f" `{fqdn[:32]}`" if fqdn and "sslip" not in fqdn else ""
-        lines.append(f"{icon} `{a['name'][:28]}`{domain}")
-    await send_chunks(chat_id, "\n".join(lines))
-
-async def do_report(chat_id):
-    await typing(chat_id)
-    s = await infra_snapshot()
-    ctx = (f"Stan: {s['healthy']}/{s['total']} OK, {s['broken']} problemów: "
-           f"{', '.join(s['broken_names']) or 'brak'}\n"
-           f"Smoke: {s['smoke_total']-s['smoke_failed']}/{s['smoke_total']} OK, "
-           f"fails: {', '.join(f'{a}/{t}' for a,t in s['smoke_failures']) or 'brak'}\n"
-           f"Alerty: {s['alerts']}")
-    reply = await ask_ai(chat_id,
-        "Przygotuj krótki raport dzienny dla właściciela. Co działa, co wymaga uwagi, 3 priorytety. Max 250 słów.",
-        model=TIER2, extra_ctx=ctx)
-    await send_chunks(chat_id, f"*📋 Raport dzienny {s['ts']}*\n\n{reply}")
+    dep_id = deps[0].get("deployment_uuid","?")[:12] if deps else "?"
+    await send(chat_id, f"Deploy `{name}` zlecony! ID: `{dep_id}` — sprawdz za ~3min.")
 
 async def do_guardian_ask(chat_id, app_ref: str, question: str):
-    """Pyta guardian bota konkretnej appki — specjalistyczna wiedza lokalna."""
     name, _, domain = find_app(app_ref)
     if not domain:
-        await send(chat_id, f"❓ `{app_ref}` nie ma guardian bota lub nie znam domeny."); return
+        await send(chat_id, f"`{app_ref}` nie ma guardian bota."); return
     await typing(chat_id)
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
+        async with httpx.AsyncClient(timeout=25) as c:
             r = await c.post(f"https://{domain}/api/guardian",
-                json={"message":question,"userId":f"manager_{chat_id}"},
+                json={"message":question,"userId":"guardian_manager"},
                 headers={"Content-Type":"application/json"})
             if r.status_code == 200:
                 reply = r.json().get("reply","brak odpowiedzi")
-                await send(chat_id, f"*🤖 Guardian `{name}`:*\n\n{reply[:1500]}")
+                await send(chat_id, f"*Guardian `{name}`:*\n\n{reply[:1500]}")
             else:
-                await send(chat_id, f"❌ Guardian `{name}` HTTP {r.status_code}. Może nie działa?")
+                await send(chat_id, f"Guardian `{name}` HTTP {r.status_code}")
     except Exception as ex:
-        await send(chat_id, f"❌ Błąd połączenia z guardian `{name}`: {ex}")
+        await send(chat_id, f"Blad guardian `{name}`: {ex}")
+
+async def do_openmanus_task(chat_id, task_desc: str):
+    """Tworzy autonomiczny task w OpenManus."""
+    await typing(chat_id)
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(f"{OPENMANUS_URL}/api/tasks",
+                json={"prompt": task_desc},
+                headers={"Content-Type":"application/json"})
+            if r.status_code in (200,201):
+                d = r.json()
+                task_id = d.get("task_id","?")
+                await send(chat_id,
+                    f"OpenManus task stworzony!\n"
+                    f"ID: `{task_id}`\n"
+                    f"Status: sprawdz na https://openmanus.ofshore.dev\n"
+                    f"Lub: `/openmanus status {task_id}`")
+            else:
+                await send(chat_id, f"OpenManus error {r.status_code}: {r.text[:100]}")
+    except Exception as ex:
+        await send(chat_id, f"OpenManus niedostepny: {ex}")
+
+async def do_content_generate(chat_id, site: str, content_type: str, prompt: str):
+    """Zleca generowanie tresci do content_queue."""
+    await typing(chat_id)
+    # Zapisz do kolejki
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{SB_URL}/rest/v1/content_queue",
+                headers={"apikey":SB_KEY,"Authorization":f"Bearer {SB_KEY}",
+                         "Content-Type":"application/json","Prefer":"return=minimal"},
+                json={"site":site,"content_type":content_type,
+                      "ai_prompt":prompt,"status":"pending"})
+            if r.status_code in (200,201,204):
+                await send(chat_id,
+                    f"Content request dodany do kolejki!\n"
+                    f"Site: `{site}`\n"
+                    f"Typ: `{content_type}`\n"
+                    f"Status: pending -> n8n/AutoHeal pobierze i wygeneruje\n\n"
+                    f"Sprawdz: `/queue`")
+                # Zapisz tez do autonomy_log
+                await sb("public_log_autonomy", {
+                    "p_actor":"guardian_bot","p_action":"queued_content",
+                    "p_app_name":site,"p_severity":"info",
+                    "p_description":f"Content type={content_type}: {prompt[:50]}"})
+            else:
+                await send(chat_id, f"Blad zapisu do kolejki: {r.status_code}")
+    except Exception as ex:
+        await send(chat_id, f"Blad: {ex}")
+
+async def do_daily_report(chat_id):
+    """Pozytywny raport dzienny — co system zrobil sam."""
+    await typing(chat_id)
+    s = await snap()
+    savings = await sb("public_get_savings_report", {"p_days": 1}) or {}
+    autonomy = await sb("public_get_autonomy_log", {"p_hours": 24}) or []
+    
+    time_h  = savings.get("total_time_saved_hours", 0) or 0
+    cost_saved = savings.get("total_cost_saved_usd", 0) or 0
+    ai_cost = savings.get("total_ai_cost_usd", 0) or 0
+    actions = savings.get("actions_count", 0) or 0
+    human_needed = sum(1 for a in autonomy if a.get("human_needed"))
+    
+    ctx = (f"Dzisiejsze dane:\n"
+           f"- {s['healthy']}/{s['total']} appow dziala\n"
+           f"- {actions} autonomicznych akcji\n"
+           f"- {float(time_h)*60:.0f}min zaoszczedzone\n"
+           f"- ${cost_saved} zaoszczdzone, ${ai_cost} wydane na AI\n"
+           f"- {human_needed} spraw wymagalo interwencji\n"
+           f"- Brakujace automatyzacje: {s['goals_missing']}")
+    
+    # Sonnet dla raportu (warto zainwestowac)
+    report = await ask_claude(chat_id,
+        "Napisz krotki, pozytywny raport dzienny dla wlasciciela platformy. "
+        "Podkresl co system zrobil autonomicznie, ile czasu/pieniedzy zaoszczedzono, "
+        "1-2 priorytety na jutro. Max 200 slow. Ton: menedzerski, pozytywny ale konkretny.",
+        model=SONNET, extra=ctx, no_history=True)
+    
+    await send(chat_id, f"*Raport dzienny {s['ts']}*\n\n{report}", kbd=kbd_main())
 
 async def do_n8n_workflows(chat_id):
-    """Lista workflow w n8n."""
     if not N8N_KEY:
-        await send(chat_id, "⚠️ Brak N8N_API_KEY. Dodaj w Coolify envs bota.")
-        return
+        await send(chat_id, "Brak N8N_API_KEY w envach bota."); return
     await typing(chat_id)
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -458,326 +534,349 @@ async def do_n8n_workflows(chat_id):
             if r.status_code == 200:
                 wf = r.json().get("data",[])
                 if not wf:
-                    await send(chat_id, "n8n działa ale brak workflow. Dodaj je na n8n.ofshore.dev")
+                    await send(chat_id,
+                        "n8n dziala ale nie ma workflow.\n"
+                        "Przejdz na https://n8n.ofshore.dev i dodaj.\n"
+                        "Lub uzyj `/build workflow` aby wygenerowac specyfikacje.")
                     return
-                lines = [f"*⚙️ n8n Workflows ({len(wf)})*\n"]
+                lines = [f"*n8n Workflows ({len(wf)})*\n"]
                 for w in wf:
-                    icon = "✅" if w.get("active") else "⏸"
-                    lines.append(f"{icon} `{w.get('name','?')}` (ID: {w.get('id','?')})")
+                    lines.append(f"{'OK' if w.get('active') else '--'} `{w.get('name','?')}` (ID:{w.get('id','?')})")
                 await send(chat_id, "\n".join(lines))
             else:
-                await send(chat_id, f"❌ n8n API błąd: {r.status_code}")
+                await send(chat_id, f"n8n API error: {r.status_code}")
     except Exception as ex:
-        await send(chat_id, f"❌ n8n niedostępne: {ex}")
+        await send(chat_id, f"n8n niedostepne: {ex}")
 
-async def do_n8n_trigger(chat_id, workflow_name: str):
-    """Uruchamia workflow n8n po nazwie."""
-    if not N8N_KEY:
-        await send(chat_id, "⚠️ Brak N8N_API_KEY."); return
-    await typing(chat_id)
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            # Znajdź workflow
-            r = await c.get(f"{N8N_URL}/api/v1/workflows",
-                headers={"X-N8N-API-KEY":N8N_KEY})
-            wf_list = r.json().get("data",[])
-            wf = next((w for w in wf_list if workflow_name.lower() in w.get("name","").lower()), None)
-            if not wf:
-                names = ", ".join(f"`{w['name']}`" for w in wf_list[:5])
-                await send(chat_id, f"❓ Nie znalazłem workflow `{workflow_name}`.\nDostępne: {names}")
-                return
-            # Uruchom przez webhook lub manual trigger
-            wf_id = wf["id"]
-            r2 = await c.post(f"{N8N_URL}/api/v1/workflows/{wf_id}/activate",
-                headers={"X-N8N-API-KEY":N8N_KEY})
-            await send(chat_id, f"⚙️ Workflow `{wf['name']}` aktywowany!\n"
-                               f"Sprawdź wykonania na https://n8n.ofshore.dev")
-    except Exception as ex:
-        await send(chat_id, f"❌ n8n błąd: {ex}")
-
-async def do_envs(chat_id, app_ref: str):
-    name, uuid, _ = find_app(app_ref)
-    if not uuid:
-        await send(chat_id, f"❓ Nie znam `{app_ref}`."); return
-    await typing(chat_id)
-    r = await cf(f"/applications/{uuid}/envs")
-    envs = r if isinstance(r,list) else []
-    if not envs:
-        await send(chat_id, f"❌ Brak env vars dla `{name}`."); return
-    lines = [f"*🔧 Env vars `{name}` ({len(envs)})*\n"]
-    for e in envs:
-        k = e.get("key","?")
-        v = e.get("value","")
-        safe = v[:6]+"..." if any(x in k.upper() for x in ["TOKEN","KEY","SECRET","PASS"]) else v[:40]
-        lines.append(f"  `{k}` = `{safe}`")
-    await send_chunks(chat_id, "\n".join(lines))
-
-async def do_build_request(chat_id, description: str):
+# ── Watcher — logika krytycznosci ─────────────────────────────────────────
+async def watcher():
     """
-    Gdy bot nie potrafi czegoś zrobić — generuje specyfikację do budowy
-    i informuje Macieja że potrzeba nowej funkcji.
+    Sprawdza stan co 2min.
+    Budzi Macieja TYLKO gdy app down >5min I auto-fix nie pomoglo.
     """
-    await typing(chat_id)
-    spec = await ask_ai(chat_id,
-        f"Maciej potrzebuje nowej funkcji w bocie Guardian: '{description}'\n"
-        "Przygotuj krótką specyfikację techniczną (max 150 słów): co zbudować, "
-        "jak to wdrożyć, jakie API/dane są potrzebne. Bądź konkretny.",
-        model=TIER2)
+    global downtime_tracker
+    await asyncio.sleep(60)
     
-    msg = (f"*🔧 Specyfikacja nowej funkcji*\n\n"
-           f"Żądanie: _{description}_\n\n{spec}\n\n"
-           f"_Aby zbudować: wklej tę specyfikację do Claude.ai lub powiedz Manusowi._")
-    await send(chat_id, msg)
+    while True:
+        try:
+            apps = await get_apps(force=True)
+            now  = time.time()
+            
+            for app in apps:
+                name   = app["name"]
+                status = app.get("status","")
+                is_down = "exited" in status or "restarting" in status
+                
+                if is_down:
+                    if name not in downtime_tracker:
+                        downtime_tracker[name] = now
+                        # Zaraz probuj auto-restart
+                        uuid = app.get("uuid","")
+                        if uuid:
+                            log.info(f"Auto-restart attempt: {name}")
+                            await cf(f"/applications/{uuid}/restart","POST")
+                            await sb("public_log_autonomy", {
+                                "p_actor":"watcher","p_action":"auto_restart",
+                                "p_app_name":name,"p_severity":"warning",
+                                "p_description":f"App down detected, auto-restart triggered"})
+                            await sb("public_record_saving", {
+                                "p_event_type":"auto_restart","p_app_name":name,
+                                "p_description":"Auto-restart prevented manual intervention",
+                                "p_time_saved_min":30,"p_cost_saved_usd":0,"p_ai_tokens":0,"p_ai_cost":0})
+                    else:
+                        down_min = (now - downtime_tracker[name]) / 60
+                        if down_min >= CRITICAL_DOWNTIME_MIN:
+                            # Sprawdz czy juz notyfikowalm
+                            key = f"crit_{name}_{int(now/300)}"  # co 5min nowy key
+                            if key not in alert_notified and ADMIN_ID:
+                                alert_notified.add(key)
+                                await send(ADMIN_ID,
+                                    f"WYMAGANA INTERWENCJA\n\n"
+                                    f"`{name}` nie dziala od {down_min:.0f}min.\n"
+                                    f"Auto-restart nie pomogl.\n\n"
+                                    f"Sprawdz logi: `/logs {name}`\n"
+                                    f"Deploy: `/deploy {name}`")
+                                await sb("public_log_autonomy", {
+                                    "p_actor":"watcher","p_action":"escalated_to_owner",
+                                    "p_app_name":name,"p_severity":"critical",
+                                    "p_human_needed":True,
+                                    "p_description":f"Down {down_min:.0f}min, auto-fix failed"})
+                else:
+                    if name in downtime_tracker:
+                        down_min = (now - downtime_tracker.pop(name)) / 60
+                        if down_min > 2 and ADMIN_ID:
+                            await send(ADMIN_ID,
+                                f"`{name}` wrocil do dzialania po {down_min:.0f}min.")
+                        await sb("public_record_saving", {
+                            "p_event_type":"auto_recovery","p_app_name":name,
+                            "p_description":f"App recovered after {down_min:.0f}min downtime",
+                            "p_time_saved_min":down_min*2,"p_cost_saved_usd":0.5,
+                            "p_ai_tokens":0,"p_ai_cost":0})
+            
+            # Przegruntuj alert_notified
+            if len(alert_notified) > 500:
+                alert_notified.clear()
+                
+        except Exception as ex:
+            log.error(f"watcher: {ex}")
+        
+        await asyncio.sleep(120)  # co 2 minuty
 
-# ── Message router ──────────────────────────────────────────────────────────
+async def daily_reporter():
+    """Wysyla raport dzienny o 8:00."""
+    while True:
+        now = datetime.now()
+        if now.hour == 8 and now.minute < 5 and ADMIN_ID:
+            try:
+                await do_daily_report(ADMIN_ID)
+                await asyncio.sleep(360)  # nie wysylaj 2x w ciagu 6min
+            except Exception as ex:
+                log.error(f"daily_reporter: {ex}")
+        await asyncio.sleep(60)
+
+# ── Message router ────────────────────────────────────────────────────────
 async def handle_msg(chat_id: str, user_id: str, text: str):
     if ALLOWED and user_id not in ALLOWED and chat_id not in ALLOWED:
-        await send(chat_id, "🔒 Brak dostępu."); return
-
+        await send(chat_id, "Brak dostepu."); return
+    
     log.info(f"[{chat_id}] {text[:80]}")
     t  = text.strip()
     tl = t.lower()
 
-    # ── /start i /help ──
+    # /start
     if tl in ["/start","start"]:
         await send(chat_id,
-            "👋 *Guardian v5 — Manager ofshore.dev*\n\n"
-            "*Szybkie komendy:*\n"
-            "`/status` — stan infrastruktury\n"
-            "`/smoke` — wyniki smoke testów\n"
-            "`/alerts` — aktywne alerty\n"
-            "`/report` — raport AI dzienny\n"
-            "`/apps` — lista aplikacji\n"
-            "`/logs watchdog` — logi aplikacji\n"
+            "*Guardian v6 — Autonomiczny Manager*\n\n"
+            "Komendy zarzadzania:\n"
+            "`/status` — stan infra\n"
+            "`/savings` — ile zaoszczedzono\n"
+            "`/critical` — sprawy wymagajace Ciebie\n"
+            "`/autonomy` — co system zrobil sam\n"
+            "`/goals` — cele automatyzacji\n"
+            "`/report` — raport dzienny AI\n\n"
+            "Operacje:\n"
             "`/restart quiz` — restart\n"
-            "`/deploy manus` — wdróż\n"
-            "`/envs quiz` — env vars\n"
-            "`/ask manus jakie modele masz?` — pytaj guardian\n"
-            "`/n8n` — lista workflow n8n\n"
-            "`/claude <pytanie>` — konsultacja z Claude Sonnet\n"
-            "`/build <opis>` — wygeneruj specyfikację nowej funkcji\n"
-            "`/clear` — wyczyść historię\n\n"
-            "💬 Pisz też normalnie po polsku — rozumiem wszystko!",
+            "`/deploy manus` — deploy\n"
+            "`/logs watchdog` — logi\n"
+            "`/ask manus <pytanie>` — guardian appki\n"
+            "`/openmanus <task>` — autonomiczny agent\n"
+            "`/content kamila product <prompt>` — generuj tresc\n"
+            "`/n8n` — workflow automation\n"
+            "`/claude <pytanie>` — Sonnet (gleboka analiza)\n"
+            "`/resolve <id>` — zamknij krytyczny alert\n\n"
+            "Piszesz normalnie po polsku — rozumiem wszystko.",
             kbd=kbd_main()); return
 
-    if tl in ["/help","help","pomoc"]:
-        help_text = (
-            "*Pelna pomoc*\n\n"
-            "Pisz naturalnie po polsku:\n"
-            "- status / co slychac -> stan infra\n"
-            "- zrestartuj quiz -> restart\n"
-            "- logi watchdog -> logi\n"
-            "- raport -> raport dzienny\n\n"
-            "*AI routing (zasada pomocniczosci):*\n"
-            "Proste pytania -> Haiku (szybkie/tanie)\n"
-            "Analiza/debug -> Sonnet (dokladne)\n"
-            "/claude <pytanie> -> wymuszony Sonnet\n"
-            "/ask <app> <pytanie> -> guardian lokalny\n"
-            "/build <opis> -> spec nowej funkcji"
-        )
-        await send(chat_id, help_text); return
-
-    # ── Komendy slash ──
-    if tl in ["/status","status","stan","co słychać","co slychac","jak idzie","health"]:
+    if tl in ["/status","status","stan","co slychac","jak idzie"]:
         await do_status(chat_id); return
-    if tl in ["/smoke","smoke","testy","wyniki testów","wyniki testow"]:
-        await do_smoke(chat_id); return
-    if tl in ["/alerts","alerty","alarmy"]:
-        await do_alerts(chat_id); return
-    if tl in ["/apps","apps","aplikacje"]:
-        await do_apps(chat_id); return
+    if tl in ["/savings","savings","oszczednosci","ile zaoszczedzono"]:
+        await do_savings(chat_id); return
+    if tl in ["/critical","critical","krytyczne","pilne"]:
+        await do_critical(chat_id); return
+    if tl in ["/autonomy","autonomy","auto-log","co zrobil"]:
+        await do_autonomy_log(chat_id); return
+    if tl in ["/goals","goals","cele","automatyzacja"]:
+        await do_goals(chat_id); return
     if tl in ["/report","report","raport"]:
-        await do_report(chat_id); return
+        await do_daily_report(chat_id); return
     if tl in ["/n8n","n8n","workflow","workflows"]:
         await do_n8n_workflows(chat_id); return
-    if tl in ["/clear","clear","wyczyść","wyczysc","zapomnij","reset"]:
+    if tl in ["/clear","clear","wyczysc","reset"]:
         sessions.pop(chat_id, None)
-        await send(chat_id, "🧹 Historia wyczyszczona!"); return
+        await send(chat_id, "Historia wyczyszczona."); return
+    if tl in ["/apps","apps","aplikacje"]:
+        apps = await get_apps(force=True)
+        lines = [f"*Aplikacje ({len(apps)})*\n"]
+        for a in sorted(apps, key=lambda x: x.get("name","")):
+            s = a.get("status","?")
+            ic = "OK" if "healthy" in s else "??" if "running" in s else "!!"
+            fqdn = a.get("fqdn","").replace("https://","").replace("http://","")
+            lines.append(f"[{ic}] `{a['name'][:25]}`" + (f" {fqdn[:30]}" if fqdn and "sslip" not in fqdn else ""))
+        await send_chunks(chat_id, "\n".join(lines)); return
 
     # /logs <app>
-    m = re.match(r'^/logs\s+(.+)$', tl) or re.search(r'\b(logi|logs)\s+([\w-]+)', tl)
+    m = re.match(r'^/logs\s+(.+)$', t) or re.search(r'\b(logi|logs)\s+([\w-]+)', tl)
     if m:
         app_ref = m.group(2) if len(m.groups()) > 1 else m.group(1)
         await do_logs(chat_id, app_ref); return
     if tl.startswith("/logs"):
-        await send(chat_id, "Użycie: `/logs watchdog` lub `/logs quiz`"); return
+        await send(chat_id, "Uzycie: `/logs watchdog`"); return
 
-    # /restart <app>
     if tl.startswith("/restart") or re.search(r'\b(zrestartuj|restart)\b', tl):
         await do_restart(chat_id, t); return
 
-    # /deploy <app>
-    if tl.startswith("/deploy") or re.search(r'\b(deploy|wdróż|wdroz)\b', tl):
+    if tl.startswith("/deploy") or re.search(r'\b(deploy|wdroz|wdroz)\b', tl):
         await do_deploy(chat_id, t); return
 
-    # /envs <app>
-    if tl.startswith("/envs"):
-        await do_envs(chat_id, tl.replace("/envs","").strip() or t); return
-
-    # /ask <app> <question>
+    # /ask <app> <q>
     if tl.startswith("/ask"):
         parts = t[4:].strip().split(None, 1)
         if len(parts) >= 2:
             await do_guardian_ask(chat_id, parts[0], parts[1])
         else:
-            await send(chat_id, "Użycie: `/ask quiz jak działa fraud detection?`")
+            await send(chat_id, "Uzycie: `/ask quiz jak dziala fraud detection?`")
         return
 
-    # /claude <pytanie> — wymuszony Sonnet (konsultacja z głównym doradcą)
-    if tl.startswith("/claude") or tl.startswith("/consult") or tl.startswith("/expert"):
-        question = re.sub(r'^/(claude|consult|expert)\s*', '', t, flags=re.IGNORECASE).strip()
-        if not question: question = "Pomóż z analizą infrastruktury"
+    # /openmanus <task>
+    if tl.startswith("/openmanus"):
+        task = t[10:].strip()
+        if task.startswith("status"):
+            task_id = task.replace("status","").strip()
+            try:
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r = await c.get(f"{OPENMANUS_URL}/api/tasks/{task_id}")
+                    await send(chat_id, f"OpenManus task `{task_id}`:\n{r.text[:300]}")
+            except Exception as ex:
+                await send(chat_id, f"Blad: {ex}")
+        elif task:
+            await do_openmanus_task(chat_id, task)
+        else:
+            await send(chat_id, "Uzycie: `/openmanus <opis zadania>`\nLub: `/openmanus status <task_id>`")
+        return
+
+    # /content <site> <type> <prompt>
+    if tl.startswith("/content"):
+        parts = t[8:].strip().split(None, 2)
+        if len(parts) >= 3:
+            await do_content_generate(chat_id, parts[0], parts[1], parts[2])
+        else:
+            await send(chat_id,
+                "Uzycie: `/content kamila product Kurs fotografii dla dzieci`\n"
+                "Typy: product, blog_post, course, quiz")
+        return
+
+    # /resolve <id>
+    if tl.startswith("/resolve"):
+        alert_id = tl.replace("/resolve","").strip()
+        if alert_id.isdigit():
+            await sb("public_resolve_critical", {"p_id": int(alert_id), "p_resolution": "Resolved by owner via Telegram"})
+            await send(chat_id, f"Alert #{alert_id} zamkniety.")
+        else:
+            await send(chat_id, "Uzycie: `/resolve 42`")
+        return
+
+    # /claude <q> — wymuszony Sonnet
+    if tl.startswith("/claude") or tl.startswith("/expert"):
+        q = re.sub(r'^/(claude|expert)\s*', '', t, flags=re.I).strip() or t
         await typing(chat_id)
-        await send(chat_id, "🤔 _Konsultuję z Claude Sonnet (Tier 2)..._")
-        reply = await escalate_to_claude(chat_id, question)
-        await send_chunks(chat_id, f"*🧠 Claude Sonnet odpowiada:*\n\n{reply}")
+        await send(chat_id, "_Konsultacja z Claude Sonnet..._")
+        reply = await ask_claude(chat_id, q, model=SONNET)
+        await send_chunks(chat_id, f"*Claude Sonnet:*\n\n{reply}")
         return
 
-    # /build <opis> — generuj spec nowej funkcji
+    # /build <spec>
     if tl.startswith("/build"):
-        desc = tl.replace("/build","").strip()
+        desc = t[6:].strip()
         if not desc:
-            await send(chat_id, "Użycie: `/build chcę żeby bot wysyłał mi raport codziennie o 9:00`")
+            await send(chat_id, "Uzycie: `/build chce zeby bot generowal blog posty dla kamila-site codziennie`")
             return
-        await do_build_request(chat_id, desc)
+        await typing(chat_id)
+        spec = await ask_claude(chat_id,
+            f"Maciej potrzebuje: '{desc}'\n"
+            "Przygotuj krotka specyfikacje techniczna (150 slow): co zbudowac, "
+            "jakie API/dane, jak wdrozyc. Konkretnie.",
+            model=SONNET, no_history=True)
+        await send_chunks(chat_id, f"*Specyfikacja:*\n\n{spec}\n\n"
+            "_Wklej do Claude.ai lub powiedz Manusowi zeby zbudowal._")
         return
 
-    # /n8n trigger <workflow>
-    if tl.startswith("/n8n trigger") or tl.startswith("/trigger"):
-        wf_name = re.sub(r'^/(n8n trigger|trigger)\s*', '', tl).strip()
-        await do_n8n_trigger(chat_id, wf_name); return
-
-    # ── Język naturalny ──
+    # Jezyk naturalny
     await typing(chat_id)
-
-    # Detekcja intencji: jeśli wyraźnie potrzeba konsultacji
-    needs_escalation = any(w in tl for w in [
-        "nie rozumiem dlaczego","zupełnie nie wiem","to skomplikowane",
-        "potrzebuję planu","jak to architektować","zaprojektuj mi",
-        "co powinienem","poradź mi","doradzaj"
-    ])
     
-    # Dodatkowy kontekst przy problemach
     extra = ""
-    if any(w in tl for w in ["nie działa","błąd","awaria","crash","down","problem"]):
+    if any(w in tl for w in ["nie dziala","blad","awaria","crash","down"]):
         apps = await get_apps(force=True)
         broken = [a["name"] for a in apps if "exited" in a.get("status","") or "restarting" in a.get("status","")]
-        if broken:
-            extra = f"Aktualnie problematyczne: {', '.join(broken)}"
+        if broken: extra = f"Down apps: {', '.join(broken)}"
     
-    if needs_escalation:
-        await send(chat_id, "🤔 _Przekazuję do Claude Sonnet (zaawansowana analiza)..._")
-        reply = await escalate_to_claude(chat_id, t)
-    else:
-        reply = await ask_ai(chat_id, t, extra_ctx=extra)
+    model = SONNET if needs_sonnet(tl) else HAIKU
+    reply = await ask_claude(chat_id, t, model=model, extra=extra)
     
-    # Wykryj czy bot mówi że czegoś nie może i zaproponuj eskalację
-    cant_phrases = ["nie mam dostępu","nie mogę","poza moimi możliwościami",
-                    "nie jestem w stanie","nie potrafię","nie mam narzędzi"]
-    if any(phrase in reply.lower() for phrase in cant_phrases):
-        reply += ("\n\n_Jeśli chcesz żebym to zbudował/wdrożył, napisz:_\n"
-                  "`/build <opis tego co potrzebujesz>`\n"
-                  "_Albo skonsultuj bezpośrednio:_ `/claude <pytanie>`")
+    # Jezeli bot mowi ze czegos nie moze
+    cant = any(p in reply.lower() for p in ["nie mam dostepu","nie moge","nie jestem","poza moimi"])
+    if cant:
+        reply += "\n\n_Jesli chcesz zbudowac te funkcje: `/build <opis>`_"
     
     await send_chunks(chat_id, reply)
 
 async def handle_cb(cb_id: str, chat_id: str, user_id: str, data: str):
     await answer_cb(cb_id)
-    if data in ("status","refresh"):  await do_status(chat_id)
-    elif data == "smoke":             await do_smoke(chat_id)
-    elif data == "alerts":            await do_alerts(chat_id)
-    elif data == "apps":              await do_apps(chat_id)
-    elif data == "report":            await do_report(chat_id)
-    elif data == "escalate":
-        await send(chat_id, "Napisz: `/claude <twoje pytanie>` aby skonsultować z Claude Sonnet.")
-    elif data == "build":
-        await send(chat_id, "Napisz: `/build <opis funkcji>` a wygeneruję specyfikację.")
-    elif data.startswith("logs_"):    await do_logs(chat_id, data[5:])
+    actions = {
+        "status": do_status, "savings": do_savings, "critical": do_critical,
+        "smoke": lambda c: do_autonomy_log(c),  # reuse
+        "autonomy": do_autonomy_log, "goals": do_goals,
+    }
+    if data in actions:
+        await actions[data](chat_id)
+    elif data == "smoke":
+        # real smoke
+        summary = await sb("public_get_smoke_summary") or []
+        ok = sum(1 for s in summary if s.get("passed"))
+        fail = [(s["app_name"],s["test_name"]) for s in summary if not s.get("passed")]
+        lines = [f"*Smoke testy* `{datetime.now().strftime('%H:%M')}`\n{ok}/{len(summary)} OK"]
+        for a,t in fail[:8]: lines.append(f"- `{a}/{t}`")
+        await send(chat_id, "\n".join(lines) if fail else f"Wszystkie {ok} testy OK!")
+    elif data.startswith("logs_"): await do_logs(chat_id, data[5:])
     elif data.startswith("restart_"): await do_restart(chat_id, data[8:])
-    elif data.startswith("deploy_"):  await do_deploy(chat_id, data[7:])
 
-# ── Background: proaktywne alerty ──────────────────────────────────────────
-async def alert_watcher():
-    await asyncio.sleep(45)
-    while True:
-        try:
-            alerts = await sb_rpc("public_get_alerts") or []
-            new_alerts = [a for a in alerts
-                          if str(a.get("id")) not in alert_notified
-                          and a.get("severity") in ("critical","warning")]
-            if new_alerts and ADMIN_ID:
-                for a in new_alerts[:3]:
-                    alert_notified.add(str(a.get("id")))
-                    icon = "🔴" if a.get("severity") == "critical" else "🟡"
-                    await send(ADMIN_ID,
-                        f"{icon} *Alert {a.get('severity','?').upper()}*\n"
-                        f"`{a.get('app_name','?')}` — {a.get('message','')[:100]}\n"
-                        f"_{a.get('source','?')}_")
-                    await asyncio.sleep(1)
-            if len(alert_notified) > 200:
-                alert_notified = set(list(alert_notified)[-100:])
-        except Exception as ex:
-            log.debug(f"alert_watcher: {ex}")
-        await asyncio.sleep(180)
-
-# ── Main ────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────
 async def main():
-    log.info("🤖 Guardian Bot v5 starting")
-    log.info(f"  AI: Anthropic (haiku+sonnet) | OpenAI: {'✅' if OPENAI_KEY else '❌'} | n8n: {'✅' if N8N_KEY else '❌'}")
-
+    log.info("Guardian Bot v6 starting — Autonomous Manager")
+    
     async with httpx.AsyncClient(timeout=10) as c:
         me = (await c.get(f"{TG}/getMe")).json()
     if not me.get("ok"):
-        log.error(f"Bad token: {me}"); return
-
+        log.error(f"Bad token"); return
+    
     bot_name = me["result"]["username"]
-    log.info(f"✅ @{bot_name} ready | allowed: {ALLOWED or 'ALL'}")
+    log.info(f"@{bot_name} ready | Claude: HAIKU+SONNET | OpenAI: {'yes' if OPENAI_KEY else 'no'} | n8n: {'yes' if N8N_KEY else 'no'}")
 
     if ADMIN_ID:
-        s = await infra_snapshot()
-        msg = (f"🤖 *Guardian v5 uruchomiony!*\n\n"
-               f"📊 {s['healthy']}/{s['total']} apps OK"
-               + (f"\n⚠️ Problemy: {', '.join(s['broken_names'])}" if s["broken_names"] else ""))
-        await tg("sendMessage", {"chat_id":ADMIN_ID,"text":msg,
-                                  "parse_mode":"Markdown","reply_markup":kbd_main()})
+        s = await snap()
+        missing_auto = s["goals_missing"]
+        msg = (f"*Guardian v6 uruchomiony!*\n\n"
+               f"{s['healthy']}/{s['total']} apps OK"
+               + (f"\nDo zbudowania: {missing_auto} automatyzacji" if missing_auto else "")
+               + (f"\n!!DOWN: {', '.join(s['broken_names'])}" if s["broken_names"] else ""))
+        await tg("sendMessage", {"chat_id":ADMIN_ID,"text":msg,"parse_mode":"Markdown","reply_markup":kbd_main()})
 
-    asyncio.create_task(alert_watcher())
+    asyncio.create_task(watcher())
+    asyncio.create_task(daily_reporter())
 
     offset = 0
     conflict_backoff = 1
     log.info("Polling...")
+    
     while True:
         try:
             async with httpx.AsyncClient(timeout=35) as c:
                 r = await c.get(f"{TG}/getUpdates",
                     params={"offset":offset,"timeout":30,"limit":10})
                 data = r.json()
-
+            
             if not data.get("ok"):
-                desc = data.get("description","?")
-                if "Conflict" in desc:
-                    log.warning(f"409 — backoff {conflict_backoff}s")
+                if "Conflict" in data.get("description",""):
+                    log.warning(f"409 backoff {conflict_backoff}s")
                     await asyncio.sleep(conflict_backoff)
                     conflict_backoff = min(conflict_backoff * 2, 30)
                     continue
                 await asyncio.sleep(5); continue
-
+            
             conflict_backoff = 1
             for upd in data["result"]:
                 offset = upd["update_id"] + 1
                 if msg := upd.get("message") or upd.get("edited_message"):
                     chat_id = str(msg["chat"]["id"])
                     user_id = str(msg["from"]["id"])
-                    text    = msg.get("text","").strip()
-                    if text:
-                        asyncio.create_task(handle_msg(chat_id, user_id, text))
+                    if msg.get("text","").strip():
+                        asyncio.create_task(handle_msg(chat_id, user_id, msg["text"]))
                 elif cb := upd.get("callback_query"):
                     asyncio.create_task(handle_cb(
                         cb["id"],
                         str(cb["message"]["chat"]["id"]),
                         str(cb["from"]["id"]),
-                        cb.get("data","")
-                    ))
+                        cb.get("data","")))
+        
         except asyncio.CancelledError: break
         except Exception as ex:
             log.error(f"Poll: {ex}")
