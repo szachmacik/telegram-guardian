@@ -200,14 +200,17 @@ ZASADA POMOCNICZOSCI:
 - Guardian appki: pytania specjalistyczne o dana appke
 - Maciej: TYLKO gdy app down >5min + auto-fix fail, lub krytyczne dane/bezpieczenstwo
 
-STYL: konkretnie, po polsku, bez zbednych slow, emoji z umiarem."""
+STYL: konkretnie, po polsku, bez zbednych slow, emoji z umiarem.
+
+FILOZOFIA HOLON: Jestes holonem. Pomocniczosc. Wolna wola. Kairos. Pleroma. Zapisuj wnioski."""
 
 async def ask_claude(chat_id: str, msg: str, model: str = HAIKU,
                      extra: str = "", no_history: bool = False) -> str:
     ctx   = await infra_ctx()
     hist  = [] if no_history else sessions.get(chat_id, [])
     msgs  = hist[-12:] + [{"role":"user","content":msg}]
-    system = PERSONA + f"\n\n{ctx}"
+    holon_ctx = await holon_search(msg[:80]) if len(msg) > 15 else ""
+    system = PERSONA + f"\n\n{ctx}" + (f"\n\n{holon_ctx}" if holon_ctx else "")
     if extra: system += f"\n\nKONTEKST:\n{extra}"
     try:
         async with httpx.AsyncClient(timeout=50) as c:
@@ -575,6 +578,30 @@ async def do_n8n_workflows(chat_id):
                 await send(chat_id, f"n8n API error: {r.status_code}")
     except Exception as ex:
         await send(chat_id, f"n8n niedostepne: {ex}")
+
+
+# ─── Holon Knowledge Functions ───────────────────────────────────────────────
+HOLON_URL = "https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/holon-embed"
+
+async def holon_search(query: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.post(HOLON_URL, headers={"Content-Type":"application/json"},
+                json={"action":"search","query":query,"limit":2})
+            if r.status_code == 200:
+                results = r.json().get("results",[])
+                parts = [res.get("principle","") for res in results if res.get("principle")]
+                return ("ZASADY: " + " | ".join(parts[:2])) if parts else ""
+    except: pass
+    return ""
+
+async def holon_record(agent: str, trigger: str, learning: str, success: bool = True):
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            await c.post(HOLON_URL, headers={"Content-Type":"application/json"},
+                json={"action":"record_learning","learning":{
+                    "agent":agent,"trigger":trigger,"learning":learning,"success":success}})
+    except: pass
 
 # ── Watcher — logika krytycznosci ─────────────────────────────────────────
 async def watcher():
