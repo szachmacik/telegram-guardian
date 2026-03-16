@@ -582,6 +582,43 @@ async def do_n8n_workflows(chat_id):
 
 
 
+
+# ─── Team Hub — komunikacja zespołowa ────────────────────────────────────────
+TEAM_HUB_URL = "https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/team-hub"
+
+async def team_send_msg(to: str, msg_type: str, subject: str, body: str,
+                         data: dict = {}, priority: str = "normal",
+                         requires_action: bool = False):
+    """Wyślij wiadomość do zespołu przez Team Hub."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            await c.post(TEAM_HUB_URL,
+                headers={"Content-Type":"application/json"},
+                json={"action":"send","agent":"guardian","to":to,
+                       "type":msg_type,"subject":subject,"body":body,
+                       "data":data,"priority":priority,
+                       "requires_action":requires_action})
+    except: pass
+
+async def team_recv_msgs(limit: int = 10) -> list:
+    """Pobierz wiadomości zespołowe."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.post(TEAM_HUB_URL,
+                headers={"Content-Type":"application/json"},
+                json={"action":"recv","agent":"guardian","limit":limit})
+            return r.json().get("result") or []
+    except: return []
+
+async def team_snapshot() -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.post(TEAM_HUB_URL,
+                headers={"Content-Type":"application/json"},
+                json={"action":"snapshot","agent":"guardian"})
+            return r.json().get("result",{})
+    except: return {}
+
 # ─── Tree of Life — monitoring narodzin i wzrostu holonów ────────────
 async def tree_report() -> dict:
     """Pobierz raport Drzewa Życia — stan wszystkich holonów."""
@@ -749,6 +786,10 @@ async def watcher():
                         if down_min > 2 and ADMIN_ID:
                             await send(ADMIN_ID,
                                 f"`{name}` wrocil do dzialania po {down_min:.0f}min.")
+                        # Raport do Team Hub
+                        await team_send_msg("all","result",f"{name} wrócił",
+                            f"App {name} odrodzil sie po {down_min:.0f}min.",
+                            {{"app":name,"down_min":down_min}})
                         # Zapisz odrodzenie w strumieniu Drzewa
                         await tree_moment("healing", name,
                             f"{name} odrodzil sie po {down_min:.0f}min. Drzewo przyjmuje z powrotem.",
@@ -830,6 +871,23 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
     if tl in ["/clear","clear","wyczysc","reset"]:
         sessions.pop(chat_id, None)
         await send(chat_id, "Historia wyczyszczona."); return
+    if tl in ["/team","team","zespol"]:
+        await typing(chat_id)
+        snap = await team_snapshot()
+        msgs = await team_recv_msgs(5)
+        agents = (snap.get("agents") or [])
+        lines = ["*Team ofshore.dev*\n"]
+        for a in agents:
+            ic = "OK" if a.get("status")=="active" else "--"
+            lines.append(f"  [{ic}] *{a.get('display_name','?')}* — {a.get('role','?')}")
+        lines.append(f"\nPending: {snap.get('pending_tasks',0)} | In progress: {snap.get('in_progress',0)}")
+        if msgs:
+            lines.append("\n*Ostatnie wiadomości:*")
+            for m in (msgs or [])[:3]:
+                lines.append(f"  [{m.get('from_agent','?')}] {m.get('subject','?')[:50]}")
+        await send(chat_id, "\n".join(lines))
+        return
+
     if tl in ["/antygravity","antygravity","ag","ag status"]:
         await do_antygravity_status(chat_id); return
     if tl.startswith("/ag task") or tl.startswith("/agtask"):
