@@ -580,6 +580,35 @@ async def do_n8n_workflows(chat_id):
         await send(chat_id, f"n8n niedostepne: {ex}")
 
 
+
+# ─── Tree of Life — monitoring narodzin i wzrostu holonów ────────────
+async def tree_report() -> dict:
+    """Pobierz raport Drzewa Życia — stan wszystkich holonów."""
+    result = await sb("tree_of_life_report", {})
+    return result or {}
+
+async def tree_evaluate_app(app_name: str, domain: str,
+                             has_guardian: bool, has_purpose: bool,
+                             has_memory: bool, has_autonomy: bool,
+                             has_learning: bool) -> dict:
+    """Oceń aplikację w świetle Drzewa Życia."""
+    result = await sb("evaluate_holon", {
+        "p_app_name": app_name, "p_domain": domain,
+        "p_has_guardian": has_guardian, "p_has_purpose": has_purpose,
+        "p_has_memory": has_memory, "p_has_autonomy": has_autonomy,
+        "p_has_learning": has_learning
+    })
+    return result or {}
+
+async def tree_moment(moment_type: str, subject: str, message: str,
+                      principle: str = None, resonance: float = 0.5):
+    """Zapisz moment w strumieniu Drzewa."""
+    await sb("tree_record_moment", {
+        "p_type": moment_type, "p_subject": subject,
+        "p_message": message, "p_principle": principle or "PLEROMATIC_GOAL",
+        "p_resonance": resonance
+    })
+
 # ─── Holon Knowledge Functions ───────────────────────────────────────────────
 HOLON_URL = "https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/holon-embed"
 
@@ -662,6 +691,10 @@ async def watcher():
                         if down_min > 2 and ADMIN_ID:
                             await send(ADMIN_ID,
                                 f"`{name}` wrocil do dzialania po {down_min:.0f}min.")
+                        # Zapisz odrodzenie w strumieniu Drzewa
+                        await tree_moment("healing", name,
+                            f"{name} odrodzil sie po {down_min:.0f}min. Drzewo przyjmuje z powrotem.",
+                            "HEALING_MEMORY", min(1.0, down_min/10))
                         await sb("public_record_saving", {
                             "p_event_type":"auto_recovery","p_app_name":name,
                             "p_description":f"App recovered after {down_min:.0f}min downtime",
@@ -739,6 +772,9 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
     if tl in ["/clear","clear","wyczysc","reset"]:
         sessions.pop(chat_id, None)
         await send(chat_id, "Historia wyczyszczona."); return
+    if tl in ["/tree","tree","drzewo","drzewo zycia","drzewo życia"]:
+        await do_tree(chat_id); return
+
     if tl in ["/apps","apps","aplikacje"]:
         apps = await get_apps(force=True)
         lines = [f"*Aplikacje ({len(apps)})*\n"]
@@ -871,6 +907,7 @@ async def handle_cb(cb_id: str, chat_id: str, user_id: str, data: str):
         lines = [f"*Smoke testy* `{datetime.now().strftime('%H:%M')}`\n{ok}/{len(summary)} OK"]
         for a,t in fail[:8]: lines.append(f"- `{a}/{t}`")
         await send(chat_id, "\n".join(lines) if fail else f"Wszystkie {ok} testy OK!")
+    elif data == "tree":           await do_tree(chat_id)
     elif data.startswith("logs_"): await do_logs(chat_id, data[5:])
     elif data.startswith("restart_"): await do_restart(chat_id, data[8:])
 
