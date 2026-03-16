@@ -23,7 +23,7 @@ BOT_ROLE    = os.environ.get("BOT_ROLE", "developer")
 CAPABILITIES = os.environ.get("BOT_CAPABILITIES", "code_fix,deploy,github,code_review,guardian_fix").split(",")
 
 # ── Standardowe envs — takie same dla każdego bota ────────────────────
-TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TG_TOKEN    = os.environ.get("ANTYGRAVITY_BOT_TOKEN","") or os.environ.get("TELEGRAM_BOT_TOKEN","")
 CLAUDE_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 GH_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 CT          = os.environ.get("COOLIFY_TOKEN", "")
