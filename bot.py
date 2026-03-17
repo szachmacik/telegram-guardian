@@ -48,6 +48,47 @@ CRITICAL_ERRORS = ["data_loss","payment_fail","security_breach","database_corrup
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [BOT] %(message)s", datefmt="%H:%M:%S")
+# ═══════════════════════════════════════════════════════════
+# VAULT BOOTSTRAP — ładuje wszystkie envs z Supabase Vault
+# Wystarczy ustawić AGENT_API_KEY i SUPABASE_URL
+# Reszta kluczy pobiera się automatycznie
+# ═══════════════════════════════════════════════════════════
+import urllib.request as _urllib
+
+def _bootstrap_from_vault():
+    """Pobiera pełną konfigurację z Supabase Vault przy starcie."""
+    secrets_url = os.environ.get("SECRETS_URL",
+        "https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/secrets")
+    agent_key = os.environ.get("AGENT_API_KEY", "ofshore-agents-2026")
+    app_role  = os.environ.get("BOT_ROLE", "guardian")
+    app_name  = os.environ.get("BOT_NAME", "antygravity")
+    
+    try:
+        body = json.dumps({"action":"bootstrap","app":app_name,"role":app_role}).encode()
+        req = _urllib.Request(secrets_url,
+            data=body,
+            headers={"Content-Type":"application/json",
+                     "x-agent-key":agent_key},
+            method="POST")
+        with _urllib.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+        if d.get("ok"):
+            envs = d.get("envs", {})
+            # Wgraj do os.environ tylko te które nie są już ustawione
+            for k, v in envs.items():
+                if k not in os.environ and v:
+                    os.environ[k] = v
+            missing = d.get("missing", [])
+            if missing:
+                logging.getLogger("vault").warning(f"Vault: brakuje {missing}")
+            else:
+                logging.getLogger("vault").info(f"Vault: {d.get('count',0)} envs loaded OK")
+    except Exception as ex:
+        logging.getLogger("vault").error(f"Vault bootstrap failed: {ex} — using existing envs")
+
+# Uruchom bootstrap zanim cokolwiek innego
+_bootstrap_from_vault()
+
 log = logging.getLogger("bot")
 
 sessions: dict[str, list] = {}
