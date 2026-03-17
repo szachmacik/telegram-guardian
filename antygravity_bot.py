@@ -28,6 +28,13 @@ CLAUDE_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 GH_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 CT          = os.environ.get("COOLIFY_TOKEN", "")
 COOLIFY     = os.environ.get("COOLIFY_URL", "https://coolify.ofshore.dev")
+# Konto techniczne do visual browsing / backend testing
+AG_EMAIL    = os.environ.get("AG_EMAIL", "antygravity@ofshore.dev")
+AG_PASSWORD = os.environ.get("AG_PASSWORD", "")
+AG_USER_ID  = os.environ.get("AG_USER_ID", "")
+# OpenAI (opcjonalne — gdy dostępne)
+OPENAI_KEY  = os.environ.get("OPENAI_API_KEY", "")
+COOLIFY     = os.environ.get("COOLIFY_URL", "https://coolify.ofshore.dev")
 SB_URL      = os.environ.get("SUPABASE_URL", "")
 SB_KEY      = os.environ.get("SUPABASE_KEY", "")
 ALLOWED     = set(x.strip() for x in os.environ.get("ALLOWED_TELEGRAM_IDS","").split(",") if x.strip())
@@ -276,6 +283,63 @@ async def handle_update(update: dict):
                     await send(chat_id, f"Manus błąd: {r.status_code}")
         except Exception as ex:
             await send(chat_id, f"Manus niedostępny: {ex}")
+        return
+
+    if tl.startswith("/audit"):
+        app = t[6:].strip() or "openmanus"
+        url_map = {
+            "openmanus": "https://openmanus.ofshore.dev",
+            "agentflow": "https://agentflow.ofshore.dev",
+            "sentinel": "https://sentinel.ofshore.dev",
+            "hub": "https://hub.ofshore.dev",
+            "quiz": "https://quiz.ofshore.dev",
+            "wp": "https://wp-manager.ofshore.dev",
+        }
+        url = url_map.get(app, f"https://{app}.ofshore.dev")
+        await send(chat_id, f"🔍 Audytuję `{app}` ({url})...")
+        import time as _time
+        t0 = _time.time()
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                # Test jako niezalogowany user
+                r1 = await c.get(url)
+                t1 = int((_time.time()-t0)*1000)
+                # Test API health
+                r2 = await c.get(f"{url}/api/health")
+                # Test guardian
+                r3 = await c.post(f"{url}/api/guardian",
+                    json={"message":"audit ping","userId":"antygravity"},
+                    headers={"Content-Type":"application/json"})
+                
+                issues = []
+                if r1.status_code != 200: issues.append(f"HTTP {r1.status_code} na głównej")
+                if "guardian" not in r3.text and '"reply"' not in r3.text:
+                    issues.append("Guardian nie odpowiada na /api/guardian")
+                
+                guardian_ok = '"reply"' in r3.text
+                report = (
+                    f"*Audit: {app}*\n\n"
+                    f"🌐 HTTP: {r1.status_code} ({t1}ms)\n"
+                    f"❤️ Health: {r2.status_code}\n"
+                    f"🤖 Guardian: {'✅ OK' if guardian_ok else '❌ HTML/brak'}\n"
+                )
+                if issues:
+                    report += f"\n⚠️ Problemy ({len(issues)}):\n"
+                    for iss in issues: report += f"  • {iss}\n"
+                else:
+                    report += "\n✅ Wszystko OK"
+                
+                # Zapisz do Supabase
+                await sb("bot_save_audit", {
+                    "p_app": app, "p_url": url,
+                    "p_issues": json.dumps(issues),
+                    "p_ui_notes": f"HTTP {r1.status_code}",
+                    "p_backend_notes": f"Guardian: {guardian_ok}",
+                    "p_status": r1.status_code, "p_time_ms": t1
+                })
+                await send(chat_id, report)
+        except Exception as ex:
+            await send(chat_id, f"❌ Audit error: {ex}")
         return
 
     # ── AI fallback ──────────────────────────────────────────────────
