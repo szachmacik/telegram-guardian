@@ -43,7 +43,7 @@ GPT_MINI = "gpt-4o-mini"               # fallback
 GEMINI  = "gemini-1.5-flash"           # fallback
 
 # Progi krytyczności — kiedy budzić Macieja
-CRITICAL_DOWNTIME_MIN = 5   # app down >5min = krytyczne
+CRITICAL_DOWNTIME_MIN = 30   # app down >5min = krytyczne
 CRITICAL_ERRORS = ["data_loss","payment_fail","security_breach","database_corrupt"]
 
 logging.basicConfig(level=logging.INFO,
@@ -790,6 +790,14 @@ async def watcher():
                 if name in EXCLUDED:
                     continue  # pomiń — zombie appki
                 status = app.get("status","")
+                # Appki wykluczone z alertów (known-broken / no health endpoint)
+                SILENT_APPS = {
+                    "antygravity-bot-v2", "antygravity-bot", "autodeploy-test",
+                    "quiz-manager", "wp-manager", "kimi-swarm",
+                    "linguaflow", "fb-ads-manager",
+                }
+                if name in SILENT_APPS:
+                    continue
                 is_down = "exited" in status or "restarting" in status
                 
                 if is_down:
@@ -853,7 +861,7 @@ async def watcher():
         except Exception as ex:
             log.error(f"watcher: {ex}")
         
-        await asyncio.sleep(120)  # co 2 minuty
+        await asyncio.sleep(600)  # co 10 minut (zmniejszono czestotliwosc alertow)
 
 async def daily_reporter():
     """Wysyla raport dzienny o 8:00."""
