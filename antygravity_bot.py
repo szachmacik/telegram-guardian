@@ -44,6 +44,12 @@ PORT        = int(os.environ.get("PORT", "8080"))
 TG          = f"https://api.telegram.org/bot{TG_TOKEN}"
 CLAUDE_H    = "claude-haiku-4-5-20251001"
 CLAUDE_S    = "claude-sonnet-4-6"
+# Ollama — darmowe modele (domyślne)
+OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_FAST = os.environ.get("OLLAMA_MODEL_FAST", "qwen2.5:0.5b")
+OLLAMA_SMART= os.environ.get("OLLAMA_MODEL_SMART", "qwen2.5:7b")
+OLLAMA_VISUAL=os.environ.get("OLLAMA_MODEL_VISUAL", "llava:7b")
+AI_MODE     = os.environ.get("AI_MODE", "free")  # free=Ollama, paid=Claude
 
 logging.basicConfig(level=logging.INFO,
     format=f"%(asctime)s [{BOT_NAME[:4].upper()}] %(message)s", datefmt="%H:%M:%S")
@@ -134,8 +140,35 @@ Rola: {BOT_ROLE}.
 Umiejetnosci: {', '.join(CAPABILITIES)}.
 Odpowiadaj po polsku gdy user pisze po polsku. Konkretnie i bez owijania."""
 
-async def ask_claude(msg: str, chat_id: str = "bot",
-                     model: str = CLAUDE_H, extra: str = "") -> str:
+async def ask_ollama(msg: str, chat_id: str = "bot",
+                    model: str = None, extra: str = "") -> str:
+    """Darmowy model przez Ollama — domyślny dla wszystkich zapytań."""
+    m = model or OLLAMA_FAST
+    hist = sessions.get(chat_id, [])
+    system = PERSONA + (f"\n\nKONTEKST:\n{extra}" if extra else "")
+    prompt = f"{system}\n\nUser: {msg}\nAssistant:"
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{OLLAMA_URL}/api/generate",
+                json={"model": m, "prompt": prompt, "stream": False,
+                      "options": {"num_predict": 800, "temperature": 0.7}})
+            if r.status_code == 200:
+                reply = r.json().get("response","").strip()
+                hist.append({"role":"user","content":msg})
+                hist.append({"role":"assistant","content":reply})
+                sessions[chat_id] = hist[-20:]
+                return reply
+            else:
+                log.warning(f"Ollama {r.status_code} — fallback Claude")
+                return await ask_claude_paid(msg, chat_id, extra=extra)
+    except Exception as ex:
+        log.warning(f"Ollama error ({ex}) — fallback Claude")
+        return await ask_claude_paid(msg, chat_id, extra=extra)
+
+async def ask_claude_paid(msg: str, chat_id: str = "bot",
+                          model: str = None, extra: str = "") -> str:
+    """Płatny Claude — tylko gdy Ollama nie radzi sobie lub force_paid=True."""
+    m = model or CLAUDE_H
     hist = sessions.get(chat_id, [])
     msgs = hist[-10:] + [{"role": "user", "content": msg}]
     system = PERSONA + (f"\n\nKONTEKST:\n{extra}" if extra else "")
@@ -144,7 +177,7 @@ async def ask_claude(msg: str, chat_id: str = "bot",
             r = await c.post("https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
-                json={"model": model, "max_tokens": 1500,
+                json={"model": m, "max_tokens": 1500,
                       "system": system, "messages": msgs})
             d = r.json()
             if "content" in d:
@@ -156,6 +189,21 @@ async def ask_claude(msg: str, chat_id: str = "bot",
     except Exception as ex:
         log.error(f"Claude: {ex}")
     return "Błąd AI."
+
+async def ask_claude(msg: str, chat_id: str = "bot",
+                     model: str = None, extra: str = "") -> str:
+    """Router AI: domyślnie Ollama (darmowe), Claude tylko gdy force lub Ollama zawiedzie."""
+    # Zadania wymagające Claude (złożone naprawy kodu, architektura)
+    needs_claude = any(w in msg.lower() for w in [
+        "napraw", "fix", "typescript", "dockerfile", "architektura",
+        "przepisz", "zrefaktoruj", "debug", "błąd składni"
+    ])
+    if AI_MODE == "paid" or needs_claude:
+        log.info(f"[AI] Claude ({CLAUDE_H}) — {'forced' if AI_MODE=='paid' else 'code task'}")
+        return await ask_claude_paid(msg, chat_id, model, extra)
+    else:
+        log.info(f"[AI] Ollama ({OLLAMA_FAST}) — free mode")
+        return await ask_ollama(msg, chat_id, extra=extra)
 
 # ── Message handler — TUTAJ DODAJ WŁASNE KOMENDY ─────────────────────
 async def handle_update(update: dict):
@@ -345,6 +393,26 @@ async def handle_update(update: dict):
                 await send(chat_id, report)
         except Exception as ex:
             await send(chat_id, f"❌ Audit error: {ex}")
+        return
+
+    # ── Zmiana trybu AI ──────────────────────────────────────────────
+    if tl.startswith("/aimode"):
+        mode = t[7:].strip().lower()
+        if mode in ["free","paid"]:
+            import os
+            os.environ["AI_MODE"] = mode
+            global AI_MODE
+            AI_MODE = mode
+            icon = "🆓" if mode=="free" else "💰"
+            await send(chat_id,
+                f"{icon} Tryb AI zmieniony na: *{mode}*\n\n"
+                f"{'Ollama (darmowy) — domyślny' if mode=='free' else 'Claude (płatny) — wszystkie zapytania'}")
+        else:
+            await send(chat_id,
+                f"Aktualny tryb: *{AI_MODE}*\n\n"
+                "`/aimode free` — Ollama domyślnie (darmowe)\n"
+                "`/aimode paid` — Claude zawsze (płatne)\n\n"
+                "W trybie *free*: Ollama dla rozmów, Claude tylko dla napraw kodu.")
         return
 
     # ── AI fallback ──────────────────────────────────────────────────
