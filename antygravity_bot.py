@@ -603,7 +603,18 @@ async def main():
     asyncio.create_task(auto_task_loop())
 
     # POLLING z deduplikacją przez Supabase
-    offset = 0
+    # Pobierz aktualny offset - skip starych wiadomości przy restarcie
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{TG}/getUpdates", params={"offset": -1, "limit": 1})
+            d = r.json()
+            if d.get("ok") and d.get("result"):
+                offset = d["result"][-1]["update_id"] + 1
+                log.info(f"Starting from offset {offset} (skipping old messages)")
+            else:
+                offset = 0
+    except:
+        offset = 0
     conflict_backoff = 1
     log.info("Polling...")
 
