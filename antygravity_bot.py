@@ -466,6 +466,78 @@ async def setup_webhook(base_url: str) -> bool:
         log.error(f"Webhook failed: {d}")
         return False
 
+
+async def auto_task_loop():
+    """Co 30min automatycznie wykonaj pierwsze zadanie z kolejki."""
+    await asyncio.sleep(60)  # poczekaj na start
+    while True:
+        try:
+            tasks = await sb_q("antygravity_tasks",
+                "status=eq.pending&order=created_at.asc&limit=1")
+            if tasks:
+                task = tasks[0]
+                repo  = task["repo_name"]
+                ttype = task["task_type"]
+                tid   = task["id"]
+                log.info(f"[AUTO] Executing task: {ttype} on {repo}")
+
+                # Oznacz jako in_progress
+                async with httpx.AsyncClient(timeout=5) as c:
+                    await c.patch(
+                        f"{SB_URL}/rest/v1/antygravity_tasks?id=eq.{tid}",
+                        headers={"apikey":SB_KEY,"Authorization":f"Bearer {SB_KEY}",
+                                 "Content-Type":"application/json","Prefer":"return=minimal"},
+                        json={"status":"in_progress"})
+
+                result = "skipped"
+                try:
+                    if ttype == "fix_guardian":
+                        # Fix port binding w index.ts
+                        import re as _re
+                        idx, idx_sha = gh_get_file(repo,"server/_core/index.ts")
+                        if idx:
+                            new_idx = _re.sub(
+                                r'server\.listen\(port,\s*\(\)',
+                                'server.listen(port, "0.0.0.0", ()',
+                                idx)
+                            if new_idx != idx:
+                                gh_put_file(repo,"server/_core/index.ts",new_idx,idx_sha,
+                                    f"auto-fix: port binding (Antygravity auto-loop)")
+                                # Deploy
+                                repos_db = await sb_q("repo_knowledge",f"repo_name=eq.{repo}")
+                                uuid = repos_db[0].get("coolify_uuid","") if repos_db else ""
+                                if uuid:
+                                    dep = await cf(f"/deploy?uuid={uuid}&force=true","GET")
+                                    result = f"fixed+deployed {dep.get('deployments',[{}])[0].get('deployment_uuid','')[:10]}"
+                                else:
+                                    result = "fixed, no uuid"
+                            else:
+                                result = "no change needed"
+                    elif ttype == "fix_crash":
+                        result = "crash fix requires manual review"
+                except Exception as ex:
+                    result = f"error: {ex}"
+                    log.error(f"[AUTO] Task error: {ex}")
+
+                # Oznacz jako done/failed
+                status = "done" if "fix" in result or "no change" in result else "failed"
+                async with httpx.AsyncClient(timeout=5) as c:
+                    await c.patch(
+                        f"{SB_URL}/rest/v1/antygravity_tasks?id=eq.{tid}",
+                        headers={"apikey":SB_KEY,"Authorization":f"Bearer {SB_KEY}",
+                                 "Content-Type":"application/json","Prefer":"return=minimal"},
+                        json={"status":status,"result":result,
+                              "completed_at":"now()"})
+
+                # Poinformuj Guardiana
+                await msg_guardian(f"Auto-task done: {repo}",
+                    f"{ttype} → {result}", "feedback")
+                log.info(f"[AUTO] Task {tid} done: {result}")
+
+        except Exception as ex:
+            log.debug(f"[AUTO] loop: {ex}")
+        await asyncio.sleep(1800)  # co 30min
+
 async def periodic_check():
     """Co 5min sprawdź wiadomości i zarejestruj heartbeat."""
     while True:
@@ -528,6 +600,7 @@ async def main():
             f"Wpisz /help żeby zobaczyć co umiem.")
 
     asyncio.create_task(periodic_check())
+    asyncio.create_task(auto_task_loop())
 
     # POLLING z deduplikacją przez Supabase
     offset = 0
