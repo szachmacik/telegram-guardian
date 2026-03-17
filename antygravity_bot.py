@@ -337,6 +337,11 @@ async def handle_update(update: dict):
                     "p_backend_notes": f"Guardian: {guardian_ok}",
                     "p_status": r1.status_code, "p_time_ms": t1
                 })
+                # GPT-4o visual analysis
+                if OPENAI_KEY:
+                    gpt = await gpt4_analyze(url)
+                    if gpt:
+                        report += f"\n*GPT-4o:*\n{gpt[:250]}"
                 await send(chat_id, report)
         except Exception as ex:
             await send(chat_id, f"❌ Audit error: {ex}")
