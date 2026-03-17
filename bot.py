@@ -741,8 +741,13 @@ async def watcher():
             apps = await get_apps(force=True)
             now  = time.time()
             
+            # Appki wykluczone z monitoringu (zombie / deprecated)
+            EXCLUDED = {"antygravity-bot-v2", "antygravity-bot", "autodeploy-test"}
+
             for app in apps:
                 name   = app["name"]
+                if name in EXCLUDED:
+                    continue  # pomiń — zombie appki
                 status = app.get("status","")
                 is_down = "exited" in status or "restarting" in status
                 
