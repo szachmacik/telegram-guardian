@@ -11,10 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 COPY antygravity_bot.py .
-
-# Supervisor config — oba boty w jednym kontenerze
-RUN mkdir -p /var/log/supervisor
-COPY supervisord.conf /etc/supervisor/conf.d/bots.conf
+COPY supervisord.conf /etc/supervisor/supervisord.conf
 
 ENV PYTHONUNBUFFERED=1
 
