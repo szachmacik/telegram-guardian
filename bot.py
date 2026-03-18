@@ -863,6 +863,26 @@ async def watcher():
         
         await asyncio.sleep(600)  # co 10 minut (zmniejszono czestotliwosc alertow)
 
+async def angel_tick_loop():
+    """Co 10min budzi aniolow strozow wszystkich appek."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    "https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/angel-engine/tick",
+                    headers={"x-agent-key": "ofshore-agents-2026", "Content-Type": "application/json"},
+                    json={}
+                )
+                data = r.json()
+                checked = data.get("checked", 0)
+                if checked > 0:
+                    log.info(f"[Angels] Checked {checked} apps")
+        except Exception as ex:
+            log.debug(f"[Angels] tick error: {ex}")
+        await asyncio.sleep(600)
+
+
 async def daily_reporter():
     """Wysyla raport dzienny o 8:00."""
     while True:
