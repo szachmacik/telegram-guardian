@@ -1094,6 +1094,101 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
             await send(chat_id, f"Manus niedostępny: {ex}")
         return
 
+
+    if tl.startswith("/angel"):
+        parts = text.split(None, 2)
+        subcmd = parts[1].lower() if len(parts) > 1 else "status"
+        app    = parts[2] if len(parts) > 2 else ""
+        
+        if subcmd == "status":
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/angel-engine/status",
+                    headers={"x-agent-key":"ofshore-agents-2026"})
+                d = r.json()
+            s = d.get("summary",{})
+            angels = d.get("angels",[])
+            mood_icons = {"happy":"😊","content":"😐","worried":"😟","alarmed":"🚨"}
+            lines = [f"*Anioły Stróże — status*\n",
+                     f"✅ Happy: {s.get('happy',0)} | 😟 Worried: {s.get('worried',0)} | 🚨 Alarmed: {s.get('alarmed',0)}",
+                     f"Avg health: {s.get('avg_health',0)}/100\n"]
+            for a in angels:
+                icon = mood_icons.get(a.get("mood",""),"❓")
+                lines.append(f"{icon} {a['app_name']:20} {a.get('health_score',0):3}/100 {a.get('status','?')}")
+            await send(chat_id, "\n".join(lines))
+        
+        elif subcmd == "wake" and app:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/angel-engine/wake/{app}",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"}, json={})
+                d = r.json().get("result",{})
+            score = d.get("health_score",0)
+            actions = d.get("actions",[])
+            await send(chat_id, f"👼 Angel \`{app}\` obudzony\n"
+                       f"Health: {score}/100\nAkcje: {', '.join(actions)}")
+        
+        elif subcmd == "evolve" and app:
+            feature = parts[2].split(None,1)[1] if " " in (parts[2] if len(parts)>2 else "") else "brak opisu"
+            app_name = (parts[2] or "").split(None,1)[0]
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/angel-engine/evolve/{app_name}",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                    json={"feature":feature})
+                d = r.json()
+            await send(chat_id, f"🌱 Dodano do planu ewolucji \`{app_name}\`:\n_{feature}_")
+        
+        else:
+            await send(chat_id,
+                "*Komendy anioła:*\n"
+                "`/angel status` — stan wszystkich\n"
+                "`/angel wake APP` — obudź anioła\n"
+                "`/angel evolve APP feature` — dodaj ewolucję")
+        return
+
+    if tl.startswith("/heaven"):
+        parts = text.split(None, 2)
+        subcmd = parts[1].lower() if len(parts) > 1 else "status"
+        
+        if subcmd in ["status","list"]:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/heaven-vault/list?limit=5",
+                    headers={"x-agent-key":"ofshore-agents-2026"})
+                snaps = r.json().get("snapshots",[])
+            lines = ["*Niebiański Skarbiec — snapshoty*\n"]
+            for s in snaps:
+                stable = "⭐" if s.get("is_stable") else "  "
+                lines.append(f"{stable} #{s['id']} `{s['snapshot_name'][:30]}` {s['created_at'][:10]} {s.get('size_kb',0)}KB")
+            await send(chat_id, "\n".join(lines) if lines else "Brak snapshotów")
+        
+        elif subcmd == "backup":
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/heaven-vault/snapshot",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                    json={"created_by":"guardian","mark_stable": len(parts)>2 and "stable" in parts[2]})
+                d = r.json()
+            await send(chat_id, f"✅ Snapshot #{d.get('snapshot_id')} zapisany\n"
+                       f"Apps: {d.get('apps')} | Size: {d.get('size_kb')}KB")
+        
+        elif subcmd == "restore" and len(parts) > 2:
+            snap_id = parts[2].strip()
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/heaven-vault/restore",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                    json={"snapshot_id":int(snap_id),"dry_run":True})
+                d = r.json()
+            plan = "\n".join(d.get("plan",[])[:5])
+            await send(chat_id, f"🔍 *Dry-run restore #{snap_id}:*\n{plan}\n\n"
+                       f"Wyślij `/heaven restore {snap_id} confirm` żeby przywrócić naprawdę.")
+        
+        else:
+            await send(chat_id,
+                "*Heaven Vault — Niebiański Skarbiec*\n\n"
+                "`/heaven status` — lista snapshotów\n"
+                "`/heaven backup` — zrób snapshot teraz\n"
+                "`/heaven backup stable` — oznacz jako stabilny\n"
+                "`/heaven restore ID` — podgląd przywracania\n"
+                "`/heaven restore ID confirm` — przywróć naprawdę")
+        return
+
     # Jezyk naturalny
     await typing(chat_id)
     
