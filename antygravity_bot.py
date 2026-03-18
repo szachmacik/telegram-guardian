@@ -509,6 +509,87 @@ async def setup_webhook(base_url: str) -> bool:
 
 
 async def auto_task_loop():
+    """Co 30min pobierz i wykonaj zadania z kolejki (antygravity_tasks + agent_tasks)."""
+    await asyncio.sleep(90)  # poczekaj na pełny start
+    while True:
+        try:
+            # ── 1. Agent Tasks (nowy system) ──────────────────────────
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/agent-dispatch",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                    json={"action":"get_mine","agent":"antygravity","limit":3})
+                data = r.json()
+            
+            for task in data.get("tasks", []):
+                tid = task["id"]
+                ttype = task.get("task_type","")
+                title = task.get("title","")
+                desc  = task.get("description","")
+                payload = task.get("payload", {})
+                
+                log.info(f"[DISPATCH] Task #{tid}: {title[:50]}")
+                
+                # Claim zadanie
+                async with httpx.AsyncClient(timeout=5) as c:
+                    cr = await c.post("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/agent-dispatch",
+                        headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                        json={"action":"claim","task_id":tid,"agent":"antygravity"})
+                    if not cr.json().get("ok"): continue
+                
+                result = "skipped"
+                try:
+                    if ttype in ["code_fix","deploy"]:
+                        # Użyj Claude do analizy + własnych narzędzi do naprawy
+                        advice = await ask_ollama(
+                            f"Zadanie: {desc}\n\nPayload: {json.dumps(payload)}\n\n"
+                            f"Co powinienem zrobić krok po kroku? Bądź konkretny.",
+                            chat_id="auto_task"
+                        )
+                        result = f"Analiza: {advice[:300]}"
+                        
+                    elif ttype == "audit":
+                        url = payload.get("url","")
+                        if url:
+                            async with httpx.AsyncClient(timeout=15) as c:
+                                ra = await c.post(
+                                    f"{SB_URL}/functions/v1/visual-audit",
+                                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                                    json={"url":url,"app_name":payload.get("app_name","")}
+                                )
+                                ad = ra.json()
+                            result = f"Audit {url}: {'OK' if ad.get('ok') else 'Issues: '+str(ad.get('issues',[]))}"
+                    
+                    elif ttype in ["analyze","research","generate"]:
+                        # Wyślij do Claude przez bridge
+                        async with httpx.AsyncClient(timeout=30) as c:
+                            ra = await c.post(
+                                f"{SB_URL}/functions/v1/claude-bridge",
+                                headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                                json={"from":"antygravity","message":desc,"tier":"smart"}
+                            )
+                            result = ra.json().get("reply","")[:500]
+                    
+                    else:
+                        result = f"Task type '{ttype}' not handled yet"
+
+                except Exception as ex:
+                    result = f"Error: {ex}"
+                    log.error(f"[DISPATCH] Task #{tid} error: {ex}")
+                
+                # Zakończ zadanie
+                async with httpx.AsyncClient(timeout=5) as c:
+                    await c.post("https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/agent-dispatch",
+                        headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                        json={"action":"complete","task_id":tid,"agent":"antygravity",
+                              "result":result,"status":"done" if "Error" not in result else "failed"})
+                log.info(f"[DISPATCH] Task #{tid} done: {result[:80]}")
+
+        except Exception as ex:
+            log.debug(f"[DISPATCH] loop: {ex}")
+        
+        await asyncio.sleep(1800)  # co 30 minut
+
+async def auto_task_loop():
     """Co 30min automatycznie wykonaj pierwsze zadanie z kolejki."""
     await asyncio.sleep(60)  # poczekaj na start
     while True:
