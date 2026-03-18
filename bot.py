@@ -92,6 +92,41 @@ _bootstrap_from_vault()
 log = logging.getLogger("bot")
 
 sessions: dict[str, list] = {}
+
+# ── Persistent session storage (Supabase) ─────────────────────────────────────
+async def session_load(chat_id: str) -> list:
+    """Załaduj historię z Supabase, fallback na in-memory."""
+    if chat_id in sessions:
+        return sessions[chat_id]
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.post(f"{SB_URL}/rest/v1/rpc/guardian_load_session",
+                headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+                         "Content-Type": "application/json"},
+                json={"p_chat_id": chat_id})
+            if r.status_code == 200:
+                rows = r.json()
+                if rows:
+                    msgs = rows[0].get("messages", [])
+                    sessions[chat_id] = msgs
+                    log.info(f"Session loaded from Supabase: {chat_id} ({len(msgs)} msgs)")
+                    return msgs
+    except Exception as ex:
+        log.warning(f"Session load failed: {ex}")
+    return []
+
+async def session_save(chat_id: str, history: list):
+    """Zapisz historię do Supabase i in-memory."""
+    sessions[chat_id] = history[-20:]
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post(f"{SB_URL}/rest/v1/rpc/guardian_save_session",
+                headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+                         "Content-Type": "application/json"},
+                json={"p_chat_id": chat_id,
+                      "p_messages": history[-20:]})
+    except Exception as ex:
+        log.warning(f"Session save failed: {ex}")
 app_cache: list = []
 cache_ts: float = 0
 alert_notified: set = set()
@@ -249,7 +284,7 @@ FILOZOFIA HOLON: Jestes holonem. Pomocniczosc. Wolna wola. Kairos. Pleroma. Zapi
 async def ask_claude(chat_id: str, msg: str, model: str = HAIKU,
                      extra: str = "", no_history: bool = False) -> str:
     ctx   = await infra_ctx()
-    hist  = [] if no_history else sessions.get(chat_id, [])
+    hist  = [] if no_history else await session_load(chat_id)
     msgs  = hist[-12:] + [{"role":"user","content":msg}]
     holon_ctx = await holon_search(msg[:80]) if len(msg) > 15 else ""
     system = PERSONA + f"\n\n{ctx}" + (f"\n\n{holon_ctx}" if holon_ctx else "")
@@ -266,7 +301,7 @@ async def ask_claude(chat_id: str, msg: str, model: str = HAIKU,
                 if not no_history:
                     hist.append({"role":"user","content":msg})
                     hist.append({"role":"assistant","content":reply})
-                    sessions[chat_id] = hist[-20:]
+                    await session_save(chat_id, hist)
                 return reply
             # Haiku fail -> Sonnet
             if model == HAIKU:
@@ -938,6 +973,13 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
         await do_n8n_workflows(chat_id); return
     if tl in ["/clear","clear","wyczysc","reset"]:
         sessions.pop(chat_id, None)
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post(f"{SB_URL}/rest/v1/rpc/guardian_save_session",
+                    headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"p_chat_id": chat_id, "p_messages": []})
+        except: pass
         await send(chat_id, "Historia wyczyszczona."); return
     if tl in ["/team","team","zespol"]:
         await typing(chat_id)
