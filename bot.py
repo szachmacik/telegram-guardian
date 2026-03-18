@@ -273,19 +273,13 @@ async def ask_claude(chat_id: str, msg: str, model: str = HAIKU,
                 return await ask_claude(chat_id, msg, SONNET, extra, no_history)
     except Exception as ex:
         log.error(f"Claude {model}: {ex}")
-    # Fallback GPT
-    if OPENAI_KEY and OPENAI_KEY.startswith("sk-") and not OPENAI_KEY.startswith("sk-proj-P"):
-        try:
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.post("https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
-                    json={"model":GPT_MINI,"max_tokens":1500,
-                          "messages":[{"role":"system","content":system}]+msgs})
-                data = r.json()
-                if data.get("choices"):
-                    return data["choices"][0]["message"]["content"]
-        except: pass
-    return "Blad AI — sprawdz klucze API w Coolify."
+    # OpenAI fallback disabled (insufficient_quota)
+    # Uncomment when credits are topped up:
+    # if OPENAI_KEY and OPENAI_KEY.startswith("sk-") and not OPENAI_KEY.startswith("sk-proj-P"):
+    #     try:
+    #         ...gpt-4o-mini fallback...
+    #     except: pass
+    return "⚠️ Claude tymczasowo niedostępny. Spróbuj ponownie za chwilę."
 
 def needs_sonnet(text: str) -> bool:
     t = text.lower()
