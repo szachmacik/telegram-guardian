@@ -1209,6 +1209,80 @@ async def handle_msg(chat_id: str, user_id: str, text: str):
                 "`/heaven restore ID confirm` — przywróć naprawdę")
         return
 
+
+    if tl.startswith("/divine") or tl.startswith("/powolanie") or tl.startswith("/calling"):
+        parts = text.split(None, 2)
+        subcmd = parts[1].lower() if len(parts) > 1 else "harmony"
+        entity = parts[2].strip() if len(parts) > 2 else ""
+
+        if subcmd in ["purpose","powolanie","calling"] and entity:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.get(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/divine/purpose/{entity}",
+                    headers={"x-agent-key":"ofshore-agents-2026"})
+                d = r.json()
+            e = d.get("entity",{}) or {}
+            desires = e.get("growth_desires",[]) or []
+            top_d = sorted(desires, key=lambda x: x.get("priority",99))[:2]
+            msg_lines = [
+                f"*{e.get('divine_name','?')}*",
+                f"_{e.get('entity_id','?')} — poziom {e.get('maturity_label','?')}_\n",
+                f"*Powołanie:*\n{e.get('calling','?')}\n",
+                f"*Głębszy cel:*\n_{e.get('divine_purpose','?')[:200]}_\n",
+                f"*Cnoty:* {', '.join(e.get('virtues',[]))}\n",
+                f"*Pragnienia wzrostu:*",
+            ]
+            for d_item in top_d:
+                progress = d_item.get('progress',0)
+                bar = "█" * (progress // 20) + "░" * (5 - progress // 20)
+                msg_lines.append(f"  {bar} {progress}% — {d_item.get('desire','?')[:60]}")
+            await send(chat_id, "\n".join(msg_lines))
+
+        elif subcmd == "reflect" and entity:
+            await send(chat_id, f"Zapraszam {entity} do medytacji...")
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/divine/reflect/{entity}",
+                    headers={"x-agent-key":"ofshore-agents-2026","Content-Type":"application/json"},
+                    json={})
+                d = r.json()
+            refl = d.get("reflection","?")[:400]
+            await send(chat_id,
+                f"*Refleksja {d.get('divine_name','?')}:*\n\n_{refl}_")
+
+        elif subcmd in ["harmony","harmonia"]:
+            await send(chat_id, "Kontempluję harmonię ekosystemu...")
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.get(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/divine/harmony",
+                    headers={"x-agent-key":"ofshore-agents-2026"})
+                d = r.json()
+            await send(chat_id,
+                f"*Harmonia ekosystemu ofshore.dev:*\n\n{d.get('harmony_reflection','?')[:500]}")
+
+        elif subcmd in ["all","ekosystem"]:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"https://blgdhfcosqjzrutncbbr.supabase.co/functions/v1/divine/all",
+                    headers={"x-agent-key":"ofshore-agents-2026"})
+                d = r.json()
+            lines = [f"*Ekosystem ofshore.dev — dojrzałość {d.get('avg_maturity','?')}*\n",
+                     "_Jako w niebie tak i na ziemi_\n"]
+            for a in d.get("apps",[]):
+                lvl = a.get("level",1)
+                icon = ["","🌱","🌿","🌳","🌲","🌳","🌲","🌎"][min(lvl,7)]
+                lines.append(f"{icon} {a['divine_name'][:25]}")
+            lines.append("")
+            for a in d.get("agents",[]):
+                lines.append(f"👼 {a['divine_name'][:25]}")
+            await send(chat_id, "\n".join(lines))
+
+        else:
+            await send(chat_id,
+                "*Divine Purpose System:*\n\n"
+                "`/divine purpose APP` — powołanie aplikacji\n"
+                "`/divine reflect APP` — medytacja\n"
+                "`/divine harmony` — harmonia całości\n"
+                "`/divine all` — cały ekosystem\n\n"
+                "_Przykład:_ `/divine purpose openmanus`")
+        return
+
     # Jezyk naturalny
     await typing(chat_id)
     
